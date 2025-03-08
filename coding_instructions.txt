@@ -1,0 +1,214 @@
+# Optimized Detailed Plan Outline for BCEA Classification Pipeline (Pseudo-Code with Instructions)
+# This plan provides pseudo-code and detailed comments to guide a code-specialized LLM in implementing
+# the BCEA classification pipeline. Instructions focus on WHAT to do, with HOW specified for critical details.
+# BCEA is a 5-digit extension of ISIC (####.# format), and this pipeline emphasizes consistent label mapping
+# and informative, aesthetically pleasing logging.
+
+# 1. Project Setup
+# Objective: Set up the directory structure, install dependencies, and configure logging.
+
+# Pseudo-Code with Instructions
+// Step 1: Create directory structure
+// Instruction: Create the following directories and empty files:
+// - bcea_pipeline/data/{raw,processed,mappings,review}
+// - bcea_pipeline/models/{best_model,runs}
+// - bcea_pipeline/logs
+// - bcea_pipeline/src
+// - Files: config.yaml, main.py, requirements.txt, README.md, src/{__init__.py,preprocess.py,model.py,predict.py,evaluate.py,utils.py}
+create_project_structure()
+
+// Step 2: Write requirements.txt
+// Instruction: Write a requirements file with these libraries and versions:
+// torch==2.0.1, transformers==4.35.0, pandas==2.0.3, scikit-learn==1.3.0, pyyaml==6.0.1,
+// rich==13.7.0 (for styled logging), numpy==1.24.3
+write_requirements_file("bcea_pipeline/requirements.txt")
+
+// Step 3: Write config.yaml
+// Instruction: Write a YAML config file with:
+// data: {raw_dir: "data/raw/", processed_dir: "data/processed/", mappings_dir: "data/mappings/", review_dir: "data/review/"}
+// model: {name: "roberta-base", max_seq_length: 128, batch_size: 16, epochs: 3, learning_rate: 2.0e-5}
+// logging: {dir: "logs/", level: "INFO", style: "rich"}
+// output: {model_dir: "models/", best_model_dir: "models/best_model/"}
+write_config_file("bcea_pipeline/config.yaml")
+
+// Step 4: Initialize logging in src/utils.py
+// Instruction: Define a logging setup function using rich for colored, formatted output;
+// Include timestamp, level, and message; save to bcea_pipeline/logs/bcea_pipeline_<YYYYMMDD>.log;
+// Example log: "[2025-03-06 14:30:00] INFO Starting BCEA Pipeline"
+setup_logging(config["logging"]["dir"], config["logging"]["level"], config["logging"]["style"])
+
+# 2. Data Preprocessing (`src/preprocess.py`)
+# Objective: Preprocess raw CSV data, validate BCEA codes, create label mappings, and split data.
+
+# Pseudo-Code with Instructions
+// Import: Libraries for data processing, regex, tokenization, YAML handling, and logging (from utils.py)
+
+function load_config(config_path="config.yaml")
+    // Instruction: Load and return the YAML config file as a dictionary; log "Config loaded"
+    return config
+
+function validate_bcea_codes(df, output_dir)
+    // Instruction: Ensure "bcea_code" is in ####.# format using regex ^\d{4}\.\d$;
+    // Save invalid rows to output_dir/invalid_codes.csv; log count of valid and invalid codes
+    return filtered_df
+
+function create_label_mappings(df, mappings_dir)
+    // Instruction: Extract unique "bcea_code" values from df; assign sequential IDs (e.g., 0112.3 -> 0);
+    // Create id_to_label and label_to_id dictionaries; save as JSON to mappings_dir/bcea_mappings.json;
+    // Log "Created mappings for X unique BCEA codes" with sample entries
+    return id_to_label, label_to_id
+
+function preprocess_data(input_csv, config)
+    // Instruction: Load CSV with columns "description", "bcea_code"; raise error if missing
+    df = load_csv(input_csv)
+    log_info("Loaded " + len(df) + " records from " + input_csv)
+
+    // Instruction: Clean "description" (lowercase, remove non-word chars); validate BCEA codes
+    df["description"] = clean_text(df["description"])
+    df = validate_bcea_codes(df, config["data"]["processed_dir"])
+
+    // Instruction: Create and save label mappings; replace "bcea_code" with IDs in df
+    id_to_label, label_to_id = create_label_mappings(df, config["data"]["mappings_dir"])
+    df["label_id"] = df["bcea_code"].map(label_to_id)
+
+    // Instruction: Split df into train (70%), val (15%), test (15%) with stratification by "label_id";
+    // Save each split as CSV with "description" and "labelISL" to config["data"]["processed_dir"];
+    // Log split sizes
+    split_and_save_data(df, config["data"]["processed_dir"])
+
+if __name__ == "__main__":
+    // Instruction: Load config; ensure config["data"]["processed_dir"] exists; preprocess
+    // config["data"]["raw_dir"]/historical_bcea.csv; log "Preprocessing completed"
+    run_preprocessing()
+
+# 3. Model Training (`src/model.py`)
+# Objective: Train RoBERTa on preprocessed data using consistent label mappings and save the best model.
+
+# Pseudo-Code with Instructions
+// Import: Libraries for data handling, RoBERTa model, training, JSON loading, and logging (from utils.py)
+
+function load_config(config_path="config.yaml")
+    // Instruction: Load and return the YAML config file as a dictionary; log "Config loaded"
+    return config
+
+class BCEADataset
+    // Instruction: Define a dataset class to hold tokenized descriptions and label IDs for training
+    define_dataset_class()
+
+function train_model(config)
+    // Instruction: Load train.csv and val.csv; load label mappings from mappings_dir/bcea_mappings.json
+    train_df, val_df, id_to_label, label_to_id = load_data_and_mappings(config["data"]["processed_dir"], config["data"]["mappings_dir"])
+    log_info("Loaded " + len(train_df) + " training and " + len(val_df) + " validation records")
+
+    // Instruction: Prepare train and val datasets using config["model"]["max_seq_length"]
+    train_dataset, val_dataset = prepare_datasets(train_df, val_df, config["model"]["max_seq_length"])
+
+    // Instruction: Initialize RoBERTa model with config["model"]["name"] and num_labels=len(id_to_label)
+    model = initialize_model(config["model"]["name"], len(id_to_label))
+
+    // Instruction: Train model with: batch_size=16, epochs=3, learning_rate=2.0e-5, mixed precision enabled;
+    // Log progress with rich progress bar (e.g., "[Progress: ▓▓▓░░ 60%] - Epoch 2/3 - Loss: 0.234");
+    // Save best model based on eval loss
+    trainer = train_model_with_params(model, config)
+
+    // Instruction: Save best model to config["output"]["best_model_dir"]; log "Model saved"
+    save_best_model(trainer, config["output"]["best_model_dir"])
+
+if __name__ == "__main__":
+    // Instruction: Load config; train model; log "Training completed"
+    run_training()
+
+# 4. Prediction (`src/predict.py`)
+# Objective: Predict BCEA codes using the trained model and flag unknown codes.
+
+# Pseudo-Code with Instructions
+// Import: Libraries for data handling, RoBERTa prediction, JSON loading, and logging (from utils.py)
+
+function load_config(config_path="config.yaml")
+    // Instruction: Load and return the YAML config file as a dictionary; log "Config loaded"
+    return config
+
+function predict_batch(texts, model, tokenizer, id_to_label, config)
+    // Instruction: Predict label IDs for all texts; map to BCEA codes using id_to_label;
+    // Save results to config["data"]["processed_dir"]/predictions.csv with columns "description", "bcea_code";
+    // Log "Predicted X codes"
+    predictions = predict_all(texts)
+
+    // Instruction: Flag predictions not in id_to_label as "Unknown"; save to config["data"]["review_dir"]/unknown_<YYYYMMDD>.csv;
+    // Log "Flagged Y unknown codes"
+    flag_unknown_codes(predictions, config["data"]["review_dir"])
+
+if __name__ == "__main__":
+    // Instruction: Load config, model, tokenizer, and id_to_label; predict on test.csv;
+    // Log "Prediction completed"
+    run_prediction()
+
+# 5. Evaluation (`src/evaluate.py`)
+# Objective: Evaluate model performance with metrics and error analysis.
+
+# Pseudo-Code with Instructions
+// Import: Libraries for data handling, RoBERTa evaluation, metrics, and logging (from utils.py)
+
+function load_config(config_path="config.yaml")
+    // Instruction: Load and return the YAML config file as a dictionary; log "Config loaded"
+    return config
+
+class BCEADataset
+    // Instruction: Define a dataset class to hold tokenized descriptions and label IDs for evaluation
+    define_dataset_class()
+
+function evaluate_model(config)
+    // Instruction: Load test.csv and id_to_label from mappings_dir/bcea_mappings.json
+    test_df, id_to_label = load_test_data(config)
+    test_dataset = prepare_dataset(test_df, config["model"]["max_seq_length"])
+
+    // Instruction: Evaluate model on test_dataset; compute macro F1-score, accuracy, and top-3 accuracy;
+    // Log metrics (e.g., "Accuracy: 0.92, F1: 0.89")
+    metrics = compute_metrics(test_dataset)
+
+    // Instruction: Perform error analysis: top 10 misclassifications, confusion matrix;
+    // Save to config["output"]["model_dir"]/runs/run_<YYYYMMDD>/error_analysis/; log "Error analysis saved"
+    perform_error_analysis(metrics, test_df, config["output"]["model_dir"])
+
+if __name__ == "__main__":
+    // Instruction: Load config; evaluate model; log "Evaluation completed"
+    run_evaluation()
+
+# 6. CLI Interface (`main.py`)
+# Objective: Provide a command-line interface to run the pipeline.
+
+# Pseudo-Code with Instructions
+// Import: Libraries for argument parsing, pipeline components, and logging (from utils.py)
+
+function load_config(config_path)
+    // Instruction: Load and return the YAML config file as a dictionary; log "Config loaded"
+    return config
+
+function main()
+    // Instruction: Parse arguments: --config (default="config.yaml"), --skip-training,
+    // --input (for prediction), --evaluate
+    args = parse_arguments()
+
+    // Instruction: Load config
+    config = load_and_update_config(args)
+
+    if not args.skip_training
+        // Instruction: Preprocess and train model; log each step
+        run_preprocessing_and_training(config)
+
+    if args.input
+        // Instruction: Predict on input CSV; log "Predicting on " + args.input
+        run_prediction(args.input, config)
+
+    if args.evaluate
+        // Instruction: Evaluate model; log "Running evaluation"
+        run_evaluation(config)
+
+if __name__ == "__main__":
+    main()
+
+# 7. Execution Sequence
+# Instructions
+// Instruction: Run full pipeline: python bcea_pipeline/main.py --config bcea_pipeline/config.yaml
+// Run prediction only: python bcea_pipeline/main.py --skip-training --input bcea_pipeline/data/new_data.csv
+// Run evaluation: python bcea_pipeline/main.py --evaluate

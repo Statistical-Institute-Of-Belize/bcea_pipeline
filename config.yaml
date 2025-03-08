@@ -1,0 +1,50 @@
+data:
+  raw_dir: "data/raw/"
+  processed_dir: "data/processed/"
+  mappings_dir: "data/mappings/"
+  review_dir: "data/review/"
+  max_samples: 50000  # Set to a number to limit training data size (e.g., 10000)
+model:
+  # Model configuration - using smaller model for memory efficiency
+  name: "distilroberta-base"  # Smaller model than roberta-base
+  max_seq_length: 128  # Reduced from 128 to save memory
+  batch_size: 32  # Reduced batch size for M3 Pro
+  epochs: 1
+  learning_rate: 3.0e-5
+  early_stopping_patience: 2  # Stop training if no improvement for this many epochs
+  gradient_accumulation_steps: 2  # Increased to reduce memory usage
+  mixed_precision: true  # Use mixed precision for faster training on Apple Silicon
+  device: "auto"  # auto, cpu, cuda, mps (Apple Silicon)
+  
+  # Memory optimizations
+  memory:
+    min_required_gb: 2.0
+    max_usage_percentage: 0.6  # Conservative memory usage
+    cleanup_frequency: 50  # Cleanup memory every N batches
+  
+  # Dataset optimizations
+  dataset_opts:
+    lazy_loading: true  # Use lazy loading for large datasets
+  
+  # DataLoader optimizations
+  dataloader_opts:
+    num_workers: 1  # Reduced from half CPU cores to 1
+    pin_memory: false  # Disable pin_memory to save memory
+    prefetch_factor: 2  # Number of samples loaded in advance by each worker
+logging:
+  dir: "logs/"
+  level: "INFO"
+  style: "rich"
+  log_batch_frequency: 10  # Log every N batches during training
+output:
+  model_dir: "models/"
+  best_model_dir: "models/best_model/"
+evaluation:
+  auto_evaluate: true  # Run evaluation automatically after training
+  save_confusion_matrix: true  # Save confusion matrix visualization
+  save_class_performance: true  # Save per-class performance metrics
+  save_misclassifications: true  # Save misclassifications for error analysis
+  metrics_to_track:  # List of metrics to track and compare across runs
+    - accuracy
+    - f1
+    - top3_accuracy
