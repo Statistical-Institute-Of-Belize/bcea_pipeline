@@ -3,6 +3,8 @@ import os
 import logging
 import yaml
 import sys
+import json
+from datetime import datetime
 from pathlib import Path
 
 # Add the src directory to system path
@@ -160,9 +162,33 @@ def main():
         print_status(f"Stage {current_stage}/{total_stages}: Prediction", "success")
         logging.info(f"=== Starting Prediction on {args.input} ===")
         try:
-            run_prediction(args.input)
+            predictions_df = run_prediction(args.input)
             logging.info("Prediction completed successfully")
             print_status("Prediction completed successfully ✓", "success")
+            
+            # Print prediction summary
+            print_section_header("Prediction Summary")
+            print(f"  • Input file: {args.input}")
+            print(f"  • Records processed: {len(predictions_df)}")
+            
+            # Print confidence distribution
+            if 'confidence_grade' in predictions_df.columns:
+                grade_counts = predictions_df['confidence_grade'].value_counts().to_dict()
+                print("\nConfidence grade distribution:")
+                for grade in ['very_high', 'high', 'medium', 'low', 'very_low']:
+                    count = grade_counts.get(grade, 0)
+                    percentage = (count / len(predictions_df)) * 100
+                    print(f"  • {grade.replace('_', ' ').title()}: {count} ({percentage:.1f}%)")
+            
+            # Add info about enriched output
+            print("\nThe prediction output includes:")
+            print("  • Original data from input file")
+            print("  • Primary prediction (bcea_code) with industry description")
+            print("  • Confidence score and grade")
+            print("  • Two alternative predictions with industry descriptions and confidence scores")
+            
+            print("\nPrediction output saved to a timestamped CSV file in the 'data/processed/' directory.")
+            
         except Exception as e:
             logging.error(f"Prediction failed: {e}")
             print_status(f"Prediction failed: {e}", "error")
@@ -199,8 +225,11 @@ def main():
                             logging.warning(f"Could not create symlink to HTML report: {e}")
                             # Try to copy the file instead
                             import shutil
-                            shutil.copy2(report_path, os.path.join(run_dir, 'evaluation_report.html'))
-                            logging.info(f"Copied HTML report to training run directory")
+                            if os.path.exists(report_path):
+                                shutil.copy2(report_path, os.path.join(run_dir, 'evaluation_report.html'))
+                                logging.info(f"Copied HTML report to training run directory")
+                            else:
+                                logging.warning(f"Could not find evaluation report at: {report_path}")
                             
                 except Exception as e:
                     logging.warning(f"Could not save evaluation metrics to run directory: {e}")

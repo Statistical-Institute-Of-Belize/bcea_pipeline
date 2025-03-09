@@ -270,6 +270,144 @@ def check_memory_availability(required_gb=None, percentage=0.8):
     logging.info(f"Memory check passed: {available_gb:.2f}GB available")
     return True
 
+class MPSGradScaler:
+    """
+    Gradient scaler for mixed precision training on MPS (Apple Silicon).
+    Emulates functionality of torch.cuda.amp.GradScaler for MPS devices.
+    """
+    
+    def __init__(self, enabled=True, init_scale=128.0, growth_factor=2.0, 
+                 backoff_factor=0.5, growth_interval=2000):
+        """
+        Initialize MPSGradScaler.
+        
+        Args:
+            enabled (bool): Whether the scaler is enabled
+            init_scale (float): Initial scale factor
+            growth_factor (float): Factor by which to increase scale after successful steps
+            backoff_factor (float): Factor by which to decrease scale after NaN/inf
+            growth_interval (int): Number of consecutive successful steps before increasing scale
+        """
+        self.enabled = enabled
+        self.scale = init_scale if enabled else 1.0
+        self.growth_factor = growth_factor
+        self.backoff_factor = backoff_factor
+        self.growth_interval = growth_interval
+        self.successful_steps = 0
+        self._found_inf = False
+        
+        logging.info(f"MPSGradScaler initialized: enabled={enabled}, init_scale={init_scale}")
+        
+    def scale_loss(self, loss):
+        """Scale the loss value"""
+        return loss * self.scale if self.enabled else loss
+        
+    def unscale_(self, optimizer):
+        """Unscale gradients in the optimizer"""
+        if not self.enabled:
+            return
+            
+        for group in optimizer.param_groups:
+            for param in group['params']:
+                if param.grad is not None:
+                    param.grad.div_(self.scale)
+                    
+    def step(self, optimizer):
+        """Step the optimizer with NaN/inf checking"""
+        if not self.enabled:
+            optimizer.step()
+            return
+            
+        # Check for NaN/inf before stepping
+        self._found_inf = False
+        for group in optimizer.param_groups:
+            for param in group['params']:
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        self._found_inf = True
+                        break
+            if self._found_inf:
+                break
+                
+        # Adjust scale based on gradient status
+        if self._found_inf:
+            # Reduce scale and skip optimizer step
+            self.scale *= self.backoff_factor
+            self.successful_steps = 0
+            logging.warning(f"Found NaN/inf gradients, reducing scale to {self.scale}")
+            return
+        else:
+            # Step optimizer normally
+            optimizer.step()
+            self.successful_steps += 1
+            
+            # Increase scale if enough successful steps
+            if self.successful_steps >= self.growth_interval:
+                self.scale *= self.growth_factor
+                self.successful_steps = 0
+                
+    def update(self):
+        """Update scaler state - no-op for this implementation"""
+        pass
+
+class MPSAutocast:
+    """
+    Context manager for mixed precision on MPS (Apple Silicon).
+    Emulates torch.cuda.amp.autocast for MPS devices.
+    """
+    
+    def __init__(self, enabled=True, dtype=None):
+        """
+        Initialize MPSAutocast.
+        
+        Args:
+            enabled (bool): Whether autocast is enabled
+            dtype (torch.dtype): Data type to use for autocast
+        """
+        import torch
+        self.enabled = enabled
+        self.dtype = dtype or torch.float16
+        self.prev_dtype = None
+        # Keep a reference to torch for enter/exit methods
+        self.torch = torch
+
+    def __enter__(self):
+        if not self.enabled:
+            return
+        # Use the stored torch reference
+        # Save previous default dtype
+        self.prev_dtype = self.torch.get_default_dtype()
+        
+        # Set new default dtype
+        self.torch.set_default_dtype(self.dtype)
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if not self.enabled:
+            return
+        # Use the stored torch reference
+        # Restore previous default dtype
+        if self.prev_dtype is not None:
+            self.torch.set_default_dtype(self.prev_dtype)
+
+def configure_mps_memory():
+    """
+    Configure MPS (Metal Performance Shaders) memory for Apple Silicon.
+    """
+    import torch
+    if not torch.backends.mps.is_available():
+        return
+        
+    try:
+        # Force MPS to release memory when not in use
+        # Note: These are internal APIs and may change in future PyTorch versions
+        if hasattr(torch._C, "_mps_set_cache_memory_fraction"):
+            torch._C._mps_set_cache_memory_fraction(0.7)  # Use at most 70% of GPU memory
+        if hasattr(torch._C, "_mps_set_flush_on_empty_cache"):
+            torch._C._mps_set_flush_on_empty_cache(True)  # Flush memory when empty_cache() is called
+        logging.info("MPS memory configured for Apple Silicon")
+    except Exception as e:
+        logging.warning(f"Could not configure MPS memory: {e}")
+
 def cleanup_memory(device=None):
     """
     Force garbage collection and free up memory
@@ -281,6 +419,7 @@ def cleanup_memory(device=None):
         float: Available memory in GB after cleanup
     """
     import gc
+    import torch
     
     # Force garbage collection
     gc.collect()
@@ -288,6 +427,21 @@ def cleanup_memory(device=None):
     # Free CUDA cache if available
     if device and device.type == 'cuda' and torch.cuda.is_available():
         torch.cuda.empty_cache()
+    
+    # Free MPS cache if available (Apple Silicon)
+    if (device and device.type == 'mps' or 
+        (not device and torch.backends.mps.is_available())):
+        # Try to use MPS-specific memory management if available
+        try:
+            if hasattr(torch._C, "_mps_empty_cache"):
+                torch._C._mps_empty_cache()
+            
+            # Create and delete a small tensor to force memory cleanup
+            dummy = torch.zeros(1, device="mps")
+            del dummy
+            gc.collect()
+        except Exception as e:
+            logging.debug(f"Error cleaning MPS memory: {e}")
     
     # Get memory stats after cleanup
     memory = psutil.virtual_memory()

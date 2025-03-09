@@ -26,18 +26,18 @@ from src.utils import load_config, create_rich_progress, check_memory_availabili
 class BCEADataset(Dataset):
     """Dataset class for BCEA classification with memory optimization"""
     
-    def __init__(self, descriptions, labels, tokenizer, max_seq_length, lazy_loading=True):
+    def __init__(self, text_inputs, labels, tokenizer, max_seq_length, lazy_loading=True):
         """
         Initialize dataset with memory optimization
         
         Args:
-            descriptions (list): List of text descriptions
+            text_inputs (list): List of text inputs (combined business name and description)
             labels (list): List of label IDs (as strings)
             tokenizer: Hugging Face tokenizer
             max_seq_length (int): Maximum sequence length for tokenization
             lazy_loading (bool): Whether to tokenize on-the-fly (True) or precompute (False)
         """
-        self.descriptions = descriptions
+        self.text_inputs = text_inputs
         self.labels = labels
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
@@ -52,22 +52,22 @@ class BCEADataset(Dataset):
         """Tokenize all texts at once (only used when lazy_loading=False)"""
         try:
             # Replace empty strings with placeholder
-            clean_descriptions = [
-                d if isinstance(d, str) and d.strip() else "unknown description" 
-                for d in self.descriptions
+            clean_inputs = [
+                t if isinstance(t, str) and t.strip() else "unknown description" 
+                for t in self.text_inputs
             ]
             
             # Batch tokenize all at once
             self.encodings = self.tokenizer(
-                clean_descriptions,
+                clean_inputs,
                 padding='max_length',
                 truncation=True,
                 max_length=self.max_seq_length,
                 return_tensors='pt'
             )
             
-            # Clear description list to save memory
-            self.descriptions = None
+            # Clear text input list to save memory
+            self.text_inputs = None
             
         except Exception as e:
             logging.error(f"Error during batch tokenization: {e}")
@@ -76,23 +76,23 @@ class BCEADataset(Dataset):
     
     def __len__(self):
         if self.lazy_loading:
-            return len(self.descriptions)
+            return len(self.text_inputs)
         else:
             return len(self.encodings['input_ids'])
     
     def __getitem__(self, idx):
         try:
             if self.lazy_loading:
-                # Get the description
-                description = self.descriptions[idx]
+                # Get the text input (combined business name and description)
+                text_input = self.text_inputs[idx]
                 
                 # Handle empty strings
-                if not isinstance(description, str) or not description.strip():
-                    description = "unknown description"
+                if not isinstance(text_input, str) or not text_input.strip():
+                    text_input = "unknown description"
                 
                 # Tokenize text with error handling
                 encoding = self.tokenizer(
-                    description,
+                    text_input,
                     padding='max_length',
                     truncation=True,
                     max_length=self.max_seq_length,
@@ -210,9 +210,13 @@ def prepare_datasets(train_df, val_df, max_seq_length, model_name, config=None):
         
     logging.info(f"Dataset loading strategy: {'lazy loading' if lazy_loading else 'precompute tokenization'}")
     
+    # Use combined_text field if available, otherwise fallback to description only
+    input_field = 'combined_text' if 'combined_text' in train_df.columns else 'description'
+    logging.info(f"Using '{input_field}' as input for model training")
+    
     # Create training dataset
     train_dataset = BCEADataset(
-        train_df['description'].tolist(),
+        train_df[input_field].tolist(),
         train_df['label_id'].tolist(),
         tokenizer,
         max_seq_length,
@@ -221,7 +225,7 @@ def prepare_datasets(train_df, val_df, max_seq_length, model_name, config=None):
     
     # Create validation dataset - always use precomputed for validation (typically smaller)
     val_dataset = BCEADataset(
-        val_df['description'].tolist(),
+        val_df[input_field].tolist(),
         val_df['label_id'].tolist(),
         tokenizer,
         max_seq_length,
@@ -271,6 +275,9 @@ def get_device(config):
         if platform.system() == "Darwin" and platform.machine() == "arm64":
             if torch.backends.mps.is_available():
                 logging.info("Using MPS (Metal Performance Shaders) for Apple Silicon")
+                # Configure MPS memory management
+                from src.utils import configure_mps_memory
+                configure_mps_memory()
                 return torch.device('mps')
         
         # Check for CUDA
@@ -285,6 +292,9 @@ def get_device(config):
     elif device_preference == 'mps':
         if torch.backends.mps.is_available():
             logging.info("Using MPS (Metal Performance Shaders) for Apple Silicon")
+            # Configure MPS memory management
+            from src.utils import configure_mps_memory
+            configure_mps_memory()
             return torch.device('mps')
         else:
             logging.warning("MPS requested but not available. Falling back to CPU.")
@@ -474,17 +484,48 @@ def train_model_with_params(model, train_dataset, val_dataset, config):
                 
                 # Mixed precision training - MPS version
                 elif mps_amp:
-                    with torch.autocast(device_type='mps', dtype=torch.bfloat16):
-                        outputs = model(**batch)
-                        loss = outputs.loss / gradient_accumulation_steps
+                    # Simpler implementation for MPS mixed precision without custom classes
+                    # Forward pass with lower precision for better performance
+                    # Store original dtype
+                    orig_dtype = torch.get_default_dtype()
                     
-                    # No scaler for MPS, just regular backward
-                    loss.backward()
+                    # Set to float16 for the forward pass
+                    torch.set_default_dtype(torch.float16)
+                    outputs = model(**batch)
+                    loss = outputs.loss / gradient_accumulation_steps
+                    
+                    # Go back to original dtype
+                    torch.set_default_dtype(orig_dtype)
+                    
+                    # Manual scaling to improve numerical stability
+                    scale = 128.0  # Fixed scale factor
+                    scaled_loss = loss * scale
+                    scaled_loss.backward()
                     
                     if (i + 1) % gradient_accumulation_steps == 0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                        optimizer.step()
-                        scheduler.step()
+                        # Manually unscale gradients before clipping
+                        for param in model.parameters():
+                            if param.grad is not None:
+                                param.grad.div_(scale)
+                                
+                        # Check for NaN/inf gradients
+                        skip_step = False
+                        for param in model.parameters():
+                            if param.grad is not None:
+                                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                                    skip_step = True
+                                    break
+                        
+                        if not skip_step:
+                            # Standard gradient clipping
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                            
+                            # Step optimizer and scheduler
+                            optimizer.step()
+                            scheduler.step()
+                        else:
+                            logging.warning("Skipping optimizer step due to NaN/inf gradients")
+                            
                         optimizer.zero_grad()
                 
                 # Standard training (no mixed precision)
@@ -501,7 +542,24 @@ def train_model_with_params(model, train_dataset, val_dataset, config):
                 
                 # Memory cleanup based on configured frequency
                 if memory_cleanup_freq > 0 and (i + 1) % memory_cleanup_freq == 0:
-                    cleanup_memory(device)
+                    # More aggressive cleanup for MPS devices
+                    if device.type == 'mps':
+                        # Double cleanup for MPS
+                        cleanup_memory(device)
+                        # Force Python garbage collection
+                        import gc
+                        gc.collect()
+                        # Clear any unnecessary tensors
+                        if torch.backends.mps.is_available():
+                            try:
+                                # Try to force MPS memory cleanup
+                                if hasattr(torch._C, "_mps_empty_cache"):
+                                    torch._C._mps_empty_cache()
+                            except:
+                                pass
+                    else:
+                        # Standard cleanup for other devices
+                        cleanup_memory(device)
                 
                 # Accumulate training loss
                 train_loss += loss.item() * gradient_accumulation_steps
@@ -531,8 +589,25 @@ def train_model_with_params(model, train_dataset, val_dataset, config):
         val_preds = []
         val_labels = []
         
+        # Clean up memory before validation
+        cleanup_memory(device)
+        
         with torch.no_grad():
-            for batch in val_loader:
+            # Process validation in smaller batches to avoid memory issues
+            validation_batch_size = batch_size // 2  # Use smaller batch size for validation
+            
+            # Create a temporary DataLoader with smaller batch size if needed
+            if validation_batch_size != batch_size:
+                temp_val_loader = DataLoader(
+                    val_dataset, 
+                    batch_size=validation_batch_size,
+                    num_workers=0,  # Use single-thread loading for validation
+                    pin_memory=False  # Disable pin_memory to save memory
+                )
+            else:
+                temp_val_loader = val_loader
+            
+            for batch in temp_val_loader:
                 # Move batch to device
                 batch = {k: v.to(device) for k, v in batch.items()}
                 
@@ -547,23 +622,46 @@ def train_model_with_params(model, train_dataset, val_dataset, config):
                 preds = torch.argmax(logits, dim=1).cpu().numpy()
                 val_preds.extend(preds)
                 val_labels.extend(batch['labels'].cpu().numpy())
+                
+                # Move tensors back to CPU to free GPU memory
+                for k in batch:
+                    batch[k] = batch[k].cpu()
+                
+                # Clean up any temporary tensors
+                del outputs, logits, preds
+            
+            # Clean up temporary DataLoader if we created one
+            if validation_batch_size != batch_size:
+                del temp_val_loader
+                
+            # Final cleanup after validation
+            cleanup_memory(device)
         
         # Calculate average validation loss
-        avg_val_loss = val_loss / len(val_loader)
+        if validation_batch_size != batch_size:
+            # We used a temporary loader with different batch size
+            avg_val_loss = val_loss / (len(val_dataset) / validation_batch_size)
+        else:
+            avg_val_loss = val_loss / len(val_loader)
         
         # Calculate validation metrics
         val_accuracy = accuracy_score(val_labels, val_preds)
-        val_f1 = f1_score(val_labels, val_preds, average='macro', zero_division=0)
+        val_macro_f1 = f1_score(val_labels, val_preds, average='macro', zero_division=0)
+        val_weighted_f1 = f1_score(val_labels, val_preds, average='weighted', zero_division=0)
+        # Keep val_f1 as macro_f1 for backward compatibility
+        val_f1 = val_macro_f1
         
         # Log metrics
         logging.info(f"Epoch {epoch+1}/{epochs} - "
                     f"Train Loss: {avg_train_loss:.3f}, "
                     f"Val Loss: {avg_val_loss:.3f}, "
                     f"Val Accuracy: {val_accuracy:.3f}, "
-                    f"Val F1: {val_f1:.3f}")
+                    f"Val Macro F1: {val_macro_f1:.3f}, "
+                    f"Val Weighted F1: {val_weighted_f1:.3f}")
         
         # Print validation metrics in ISCO format
         print(f"{{'eval_loss': {avg_val_loss:.4f}, 'eval_accuracy': {val_accuracy:.4f}, "
+              f"'eval_macro_f1': {val_macro_f1:.4f}, 'eval_weighted_f1': {val_weighted_f1:.4f}, "
               f"'eval_f1': {val_f1:.4f}, 'epoch': {epoch+1}}}")
         
         # Save best model and handle early stopping

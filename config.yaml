@@ -3,14 +3,16 @@ data:
   processed_dir: "data/processed/"
   mappings_dir: "data/mappings/"
   review_dir: "data/review/"
-  max_samples: 50000  # Set to a number to limit training data size (e.g., 10000)
+  max_samples: 280000  # Set to a number to limit training data size (e.g., 10000)
+  use_business_name: true  # Whether to use business name as input in addition to description
+  text_separator: " | "  # Separator between business name and description
 model:
   # Model configuration - using smaller model for memory efficiency
-  name: "distilroberta-base"  # Smaller model than roberta-base
-  max_seq_length: 128  # Reduced from 128 to save memory
+  name: "distilroberta-base"  # Much smaller model than roberta-base
+  max_seq_length: 160  # Reduced from 160 to save memory
   batch_size: 32  # Reduced batch size for M3 Pro
-  epochs: 1
-  learning_rate: 3.0e-5
+  epochs: 10
+  learning_rate: 3.5e-5
   early_stopping_patience: 2  # Stop training if no improvement for this many epochs
   gradient_accumulation_steps: 2  # Increased to reduce memory usage
   mixed_precision: true  # Use mixed precision for faster training on Apple Silicon
@@ -18,9 +20,9 @@ model:
   
   # Memory optimizations
   memory:
-    min_required_gb: 2.0
-    max_usage_percentage: 0.6  # Conservative memory usage
-    cleanup_frequency: 50  # Cleanup memory every N batches
+    min_required_gb: 1.5  # Reduced from 2.0
+    max_usage_percentage: 0.5  # More conservative memory usage
+    cleanup_frequency: 25  # More frequent cleanup to prevent OOM
   
   # Dataset optimizations
   dataset_opts:
@@ -28,8 +30,9 @@ model:
   
   # DataLoader optimizations
   dataloader_opts:
-    num_workers: 1  # Reduced from half CPU cores to 1
+    num_workers: 0  # Set to 0 to avoid worker process memory overhead
     pin_memory: false  # Disable pin_memory to save memory
+    persistent_workers: false  # Since num_workers=0, not applicable
     prefetch_factor: 2  # Number of samples loaded in advance by each worker
 logging:
   dir: "logs/"

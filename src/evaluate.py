@@ -42,7 +42,7 @@ def load_test_data(config):
     
     return test_df, id_to_label
 
-def prepare_dataset(test_df, max_seq_length, model_dir):
+def prepare_dataset(test_df, max_seq_length, model_dir, config=None):
     """
     Prepare test dataset
     
@@ -50,6 +50,7 @@ def prepare_dataset(test_df, max_seq_length, model_dir):
         test_df (pd.DataFrame): Test data
         max_seq_length (int): Maximum sequence length
         model_dir (str): Model directory
+        config (dict): Configuration options (optional)
         
     Returns:
         tuple: (test_dataset, tokenizer)
@@ -57,9 +58,30 @@ def prepare_dataset(test_df, max_seq_length, model_dir):
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     
+    # Determine which text field to use based on config and available columns
+    use_business_name = config.get('data', {}).get('use_business_name', True) if config else True
+    
+    # Check if combined_text is already available
+    if 'combined_text' in test_df.columns:
+        input_field = 'combined_text'
+        logging.info(f"Using existing 'combined_text' field for evaluation")
+    # If we should use business name but need to create combined_text
+    elif use_business_name and 'bus_name' in test_df.columns:
+        separator = config.get('data', {}).get('text_separator', ' | ') if config else ' | '
+        logging.info(f"Creating combined text field from business name and description with separator '{separator}'")
+        test_df['combined_text'] = test_df.apply(
+            lambda row: f"{row['bus_name']}{separator}{row['description']}" if row['bus_name'] else row['description'],
+            axis=1
+        )
+        input_field = 'combined_text'
+    # Default to description only
+    else:
+        input_field = 'description'
+        logging.info(f"Using only 'description' field for evaluation")
+    
     # Create dataset
     test_dataset = BCEADataset(
-        test_df['description'].tolist(),
+        test_df[input_field].tolist(),
         test_df['label_id'].tolist(),
         tokenizer,
         max_seq_length
@@ -114,8 +136,11 @@ def compute_metrics(model, test_dataset, id_to_label, device):
     
     # Compute metrics
     accuracy = accuracy_score(all_labels, all_preds)
-    # Fix warning by setting zero_division=0
-    f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+    # Calculate both macro and weighted F1 scores
+    macro_f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+    weighted_f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+    # Keep the original f1 variable for backward compatibility
+    f1 = macro_f1
     
     # Compute top-3 accuracy
     top3_correct = 0
@@ -174,7 +199,9 @@ def compute_metrics(model, test_dataset, id_to_label, device):
     
     return {
         'accuracy': accuracy,
-        'f1': f1,
+        'f1': f1,  # This is macro_f1 for backward compatibility
+        'macro_f1': macro_f1,
+        'weighted_f1': weighted_f1,
         'top3_accuracy': top3_accuracy,
         'confusion_matrix': cm,
         'classification_report': report,
@@ -223,7 +250,14 @@ def perform_error_analysis(metrics, test_df, run_dir=None, output_dir=None):
     if len(misclassified_indices) > 0:
         # Get descriptions and labels for misclassified examples
         misclassified_df = pd.DataFrame()
+        
+        # Include appropriate text field(s)
         misclassified_df['description'] = test_df.iloc[misclassified_indices]['description'].reset_index(drop=True)
+        if 'bus_name' in test_df.columns:
+            misclassified_df['bus_name'] = test_df.iloc[misclassified_indices]['bus_name'].reset_index(drop=True)
+        if 'combined_text' in test_df.columns:
+            misclassified_df['combined_text'] = test_df.iloc[misclassified_indices]['combined_text'].reset_index(drop=True)
+        
         misclassified_df['true_bcea_code'] = [label_map[i]['true'] for i in misclassified_indices]
         misclassified_df['pred_bcea_code'] = [label_map[i]['pred'] for i in misclassified_indices]
         
@@ -300,6 +334,8 @@ def perform_error_analysis(metrics, test_df, run_dir=None, output_dir=None):
     metrics_dict = {
         'accuracy': metrics['accuracy'],
         'f1': metrics['f1'],
+        'macro_f1': metrics['macro_f1'],
+        'weighted_f1': metrics['weighted_f1'],
         'top3_accuracy': metrics['top3_accuracy'],
         'misclassification_rate': len(misclassified_indices) / len(labels) if len(labels) > 0 else 0
     }
@@ -318,7 +354,8 @@ def perform_error_analysis(metrics, test_df, run_dir=None, output_dir=None):
     plt.figure(figsize=(10, 6))
     metrics_to_plot = {
         'Accuracy': metrics_dict['accuracy'],
-        'F1 Score': metrics_dict['f1'],
+        'Macro F1': metrics_dict['macro_f1'],
+        'Weighted F1': metrics_dict['weighted_f1'],
         'Top-3 Accuracy': metrics_dict['top3_accuracy']
     }
     bars = plt.bar(metrics_to_plot.keys(), metrics_to_plot.values())
@@ -375,17 +412,16 @@ def evaluate_model_with_run_dir(config, model=None, tokenizer=None, id_to_label=
             test_dataset, tokenizer = prepare_dataset(
                 test_df,
                 config['model']['max_seq_length'],
-                model_dir
+                model_dir,
+                config
             )
         else:
-            # Create dataset with provided tokenizer
-            lazy_loading = config.get('model', {}).get('dataset_opts', {}).get('lazy_loading', True)
-            test_dataset = BCEADataset(
-                test_df['description'].tolist(),
-                test_df['label_id'].tolist(),
-                tokenizer,
+            # Create dataset with provided tokenizer - reuse prepare_dataset to handle text field selection
+            test_dataset, _ = prepare_dataset(
+                test_df,
                 config['model']['max_seq_length'],
-                lazy_loading=lazy_loading
+                model_dir,
+                config
             )
         
         # Set device
@@ -403,12 +439,18 @@ def evaluate_model_with_run_dir(config, model=None, tokenizer=None, id_to_label=
         
         # Log metrics
         logging.info(f"Accuracy: {metrics['accuracy']:.3f}, "
-                    f"F1: {metrics['f1']:.3f}, "
+                    f"Macro F1: {metrics['macro_f1']:.3f}, "
+                    f"Weighted F1: {metrics['weighted_f1']:.3f}, "
                     f"Top-3 Accuracy: {metrics['top3_accuracy']:.3f}")
         
         # Perform error analysis
         logging.info("Performing error analysis")
-        _, eval_metrics = perform_error_analysis(metrics, test_df, run_dir=run_dir)
+        error_dir, eval_metrics = perform_error_analysis(metrics, test_df, run_dir=run_dir)
+        
+        # Generate HTML report
+        logging.info("Generating HTML report")
+        report_path = generate_html_report(eval_metrics, error_dir, run_dir, id_to_label, config)
+        logging.info(f"HTML report generated at {report_path}")
         
         logging.info("Evaluation analysis saved")
         
@@ -589,8 +631,12 @@ def generate_html_report(metrics, error_dir, run_dir, id_to_label=None, config=N
                         <div class="value">{metrics.get('accuracy', 0):.3f}</div>
                     </div>
                     <div class="metric">
-                        <h3>F1 Score</h3>
-                        <div class="value">{metrics.get('f1', 0):.3f}</div>
+                        <h3>Macro F1</h3>
+                        <div class="value">{metrics.get('macro_f1', 0):.3f}</div>
+                    </div>
+                    <div class="metric">
+                        <h3>Weighted F1</h3>
+                        <div class="value">{metrics.get('weighted_f1', 0):.3f}</div>
                     </div>
                     <div class="metric">
                         <h3>Top-3 Accuracy</h3>
@@ -646,11 +692,35 @@ def generate_html_report(metrics, error_dir, run_dir, id_to_label=None, config=N
     misclass_path = os.path.join(error_dir, 'top_10_misclassifications.csv')
     if os.path.exists(misclass_path):
         misclass_df = pd.read_csv(misclass_path)
-        html_content += """
+        
+        # Check if combined_text is available
+        has_combined_text = 'combined_text' in misclass_df.columns
+        has_bus_name = 'bus_name' in misclass_df.columns
+        
+        # Create table header with conditional columns
+        header = """
                 <table>
                     <thead>
                         <tr>
+        """
+        
+        # Add business name header if available
+        if has_bus_name:
+            header += """
+                            <th>Business Name</th>
+            """
+            
+        header += """
                             <th>Description</th>
+        """
+        
+        # Add combined_text header if available
+        if has_combined_text:
+            header += """
+                            <th>Combined Text</th>
+            """
+        
+        header += """
                             <th>True BCEA Code</th>
                             <th>Predicted BCEA Code</th>
                         </tr>
@@ -658,20 +728,52 @@ def generate_html_report(metrics, error_dir, run_dir, id_to_label=None, config=N
                     <tbody>
         """
         
+        html_content += header
+        
         # Add rows for misclassifications (up to 10)
         for _, row in misclass_df.head(10).iterrows():
+            # Start table row
+            row_content = """
+                        <tr>
+            """
+            
+            # Add business name if available
+            if has_bus_name:
+                bus_name = row['bus_name'] if not pd.isna(row['bus_name']) else ""
+                # Limit business name length
+                if len(bus_name) > 50:
+                    bus_name = bus_name[:47] + "..."
+                row_content += f"""
+                            <td>{bus_name}</td>
+                """
+            
+            # Add description
             description = row['description']
             # Limit description length
             if len(description) > 100:
                 description = description[:97] + "..."
-                
-            html_content += f"""
-                        <tr>
+            row_content += f"""
                             <td>{description}</td>
+            """
+            
+            # Add combined_text if available
+            if has_combined_text:
+                combined_text = row['combined_text']
+                # Limit combined_text length
+                if len(combined_text) > 100:
+                    combined_text = combined_text[:97] + "..."
+                row_content += f"""
+                            <td>{combined_text}</td>
+                """
+            
+            # Add the codes
+            row_content += f"""
                             <td>{row['true_bcea_code']}</td>
                             <td>{row['pred_bcea_code']}</td>
                         </tr>
             """
+            
+            html_content += row_content
             
         html_content += """
                     </tbody>
@@ -762,12 +864,14 @@ def evaluate_model(config):
     Returns:
         tuple: (metrics, report_path) - Evaluation metrics and path to HTML report
     """
-    # Run the evaluation
-    metrics = evaluate_model_with_run_dir(config)
-    
-    # Get run directory to find error analysis files
+    # Create a run directory with timestamp that will be used consistently
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = os.path.join(config['output']['model_dir'], 'runs', f'run_{timestamp}')
+    
+    # Run the evaluation with the specific run directory
+    metrics = evaluate_model_with_run_dir(config, run_dir=run_dir)
+    
+    # The error_dir is inside the run_dir
     error_dir = os.path.join(run_dir, 'error_analysis')
     
     # Load id_to_label for report
@@ -792,7 +896,8 @@ def run_evaluation():
         f"=== BCEA Model Evaluation Report ===\n"
         f"Time: {timestamp}\n"
         f"Accuracy: {metrics['accuracy']:.3f}\n"
-        f"F1 Score: {metrics['f1']:.3f}\n"
+        f"Macro F1 Score: {metrics['macro_f1']:.3f}\n"
+        f"Weighted F1 Score: {metrics['weighted_f1']:.3f}\n"
         f"Top-3 Accuracy: {metrics['top3_accuracy']:.3f}\n"
         f"HTML Report: {report_path}\n"
         f"=== End Report ===\n"

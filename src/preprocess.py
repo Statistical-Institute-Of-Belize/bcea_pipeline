@@ -44,7 +44,7 @@ def clean_text(texts):
 
 def validate_bcea_codes(df, output_dir):
     """
-    Ensure BCEA codes are in the format ####.# using regex
+    Ensure BCEA codes are in the format ####.# or 0###.# using regex
     
     Args:
         df (pd.DataFrame): DataFrame with 'bcea_code' column
@@ -65,12 +65,12 @@ def validate_bcea_codes(df, output_dir):
     # Convert all codes to strings
     df['bcea_code'] = df['bcea_code'].astype(str)
     
-    # Use regex to validate BCEA codes (####.#)
-    bcea_pattern = r'^\d{4}\.\d$'
+    # Use regex to validate BCEA codes (####.# or 0###.#)
+    bcea_pattern = r'^(\d{4}|\d{5})\.\d$'
     
     # Try to fix common issues:
     # 1. Codes without decimal point (e.g., "12345" -> "1234.5")
-    # 2. Codes with extra zeros (e.g., "0001.2" -> "0001.2")
+    # 2. Special handling for 4-digit codes (add leading 0 for group 0 codes)
     # 3. Extra whitespace
     def fix_bcea_code(code):
         code = code.strip()
@@ -79,13 +79,26 @@ def validate_bcea_codes(df, output_dir):
         if re.match(bcea_pattern, code):
             return code
         
+        # For 3-digit codes, add a leading 0 and a decimal point
+        if re.match(r'^\d{3}$', code):
+            return '0' + code + '.0'
+        
+        # For 3-digit codes with decimal, add a leading 0
+        if re.match(r'^\d{3}\.\d$', code):
+            return '0' + code
+            
+        # If code has 4 digits (no decimal), add .0
+        if re.match(r'^\d{4}$', code):
+            return code + '.0'
+            
+        # For 4-digit codes with decimal, check if they should have a leading 0
+        # We assume major group 0 codes use 3 digits after the leading 0
+        if re.match(r'^\d{3}\.\d$', code):
+            return '0' + code
+        
         # If code has 5 digits without decimal, insert decimal point
         if re.match(r'^\d{5}$', code):
             return code[:4] + '.' + code[4:]
-        
-        # If code has 4 digits, try to add .0
-        if re.match(r'^\d{4}$', code):
-            return code + '.0'
             
         # Otherwise, mark as invalid
         return 'invalid'
@@ -105,7 +118,7 @@ def validate_bcea_codes(df, output_dir):
     # If fixes were applied, log the count
     fix_count = sum(df['original_bcea_code'] != df['bcea_code']) - len(invalid_df)
     if fix_count > 0:
-        logging.info(f"Fixed {fix_count} BCEA codes to match the ####.# format")
+        logging.info(f"Fixed {fix_count} BCEA codes to match the ####.# or 0###.# format")
     
     # Remove the temporary column from the valid dataframe
     valid_df = valid_df.drop(columns=['original_bcea_code'])
@@ -318,6 +331,11 @@ def preprocess_data(input_csv, config):
             error_msg = f"Required column '{col}' missing from {input_csv}"
             logging.error(error_msg)
             raise ValueError(error_msg)
+            
+    # Check for business name column (optional but recommended)
+    if 'bus_name' not in df.columns:
+        logging.warning("'bus_name' column not found. Creating empty column.")
+        df['bus_name'] = ""
     
     # Apply max_samples limit if specified
     max_samples = config.get('data', {}).get('max_samples')
@@ -337,9 +355,25 @@ def preprocess_data(input_csv, config):
         
         logging.info(f"Using subset of {len(df)} samples as specified by max_samples={max_samples}")
     
-    # Clean text descriptions
-    logging.info("Cleaning text descriptions")
+    # Clean text descriptions and business names
+    logging.info("Cleaning text descriptions and business names")
     df['description'] = clean_text(df['description'])
+    df['bus_name'] = clean_text(df['bus_name'])
+    
+    # Create a combined field for model input
+    # Use the separator from config if available, otherwise default to " | "
+    separator = config.get('data', {}).get('text_separator', ' | ')
+    use_business_name = config.get('data', {}).get('use_business_name', True)
+    
+    if use_business_name:
+        logging.info(f"Creating combined text field from business name and description with separator '{separator}'")
+        df['combined_text'] = df.apply(
+            lambda row: f"{row['bus_name']}{separator}{row['description']}" if row['bus_name'] else row['description'],
+            axis=1
+        )
+    else:
+        logging.info("Using only description field for model input")
+        df['combined_text'] = df['description']
     
     # Validate BCEA codes
     logging.info("Validating BCEA codes")
