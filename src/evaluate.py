@@ -102,8 +102,12 @@ def compute_metrics(model, test_dataset, id_to_label, device):
     Returns:
         dict: Metrics and predictions
     """
+    # Import utils for progress tracking
+    from src.utils import create_rich_progress, print_status
+    
     # Create DataLoader
-    dataloader = DataLoader(test_dataset, batch_size=16)
+    batch_size = 16
+    dataloader = DataLoader(test_dataset, batch_size=batch_size)
     
     # Set model to evaluation mode
     model.eval()
@@ -112,23 +116,42 @@ def compute_metrics(model, test_dataset, id_to_label, device):
     all_preds = []
     all_labels = []
     
-    # Make predictions
-    with torch.no_grad():
-        for batch in dataloader:
-            # Get labels
-            labels = batch['labels'].cpu().numpy()
-            all_labels.extend(labels)
-            
-            # Move batch to device
-            batch = {k: v.to(device) for k, v in batch.items() if k != 'labels'}
-            
-            # Forward pass
-            outputs = model(**batch)
-            
-            # Get predictions
-            logits = outputs.logits
-            preds = torch.argmax(logits, dim=1).cpu().numpy()
-            all_preds.extend(preds)
+    # Create progress bar for prediction
+    total_batches = len(dataloader)
+    print_status(f"Starting evaluation on {len(test_dataset)} samples", "info")
+    
+    # Create progress bar
+    with create_rich_progress() as progress:
+        pred_task = progress.add_task(
+            f"[cyan]Evaluating model...", 
+            total=total_batches
+        )
+        
+        # Make predictions
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(dataloader):
+                # Get labels
+                labels = batch['labels'].cpu().numpy()
+                all_labels.extend(labels)
+                
+                # Move batch to device
+                batch = {k: v.to(device) for k, v in batch.items() if k != 'labels'}
+                
+                # Forward pass
+                outputs = model(**batch)
+                
+                # Get predictions
+                logits = outputs.logits
+                preds = torch.argmax(logits, dim=1).cpu().numpy()
+                all_preds.extend(preds)
+                
+                # Update progress
+                progress.update(pred_task, advance=1, description=f"[cyan]Evaluating: {batch_idx+1}/{total_batches} batches")
+                
+        # Mark prediction as complete
+        progress.update(pred_task, description="[green]Prediction complete!")
+    
+    print_status(f"Completed predictions on {len(all_preds)} samples", "success")
     
     # Convert to numpy arrays
     all_preds = np.array(all_preds)
@@ -143,29 +166,44 @@ def compute_metrics(model, test_dataset, id_to_label, device):
     f1 = macro_f1
     
     # Compute top-3 accuracy
+    print_status("Computing top-3 accuracy...", "info")
     top3_correct = 0
-    with torch.no_grad():
-        for batch in dataloader:
-            # Get labels
-            labels = batch['labels'].cpu().numpy()
+    
+    with create_rich_progress() as progress:
+        top3_task = progress.add_task(
+            f"[cyan]Computing top-3 accuracy...", 
+            total=len(dataloader)
+        )
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(dataloader):
+                # Get labels
+                labels = batch['labels'].cpu().numpy()
+                
+                # Move batch to device
+                batch = {k: v.to(device) for k, v in batch.items() if k != 'labels'}
+                
+                # Forward pass
+                outputs = model(**batch)
+                
+                # Get top-3 predictions
+                logits = outputs.logits
+                k_value = min(3, logits.shape[1])  # Ensure k is not larger than number of classes
+                top3_preds = torch.topk(logits, k=k_value, dim=1).indices.cpu().numpy()
+                
+                # Check if true label is in top-3
+                for i, label in enumerate(labels):
+                    if label in top3_preds[i]:
+                        top3_correct += 1
+                
+                # Update progress
+                progress.update(top3_task, advance=1, description=f"[cyan]Top-3 accuracy: {batch_idx+1}/{len(dataloader)} batches")
             
-            # Move batch to device
-            batch = {k: v.to(device) for k, v in batch.items() if k != 'labels'}
-            
-            # Forward pass
-            outputs = model(**batch)
-            
-            # Get top-3 predictions
-            logits = outputs.logits
-            k_value = min(3, logits.shape[1])  # Ensure k is not larger than number of classes
-            top3_preds = torch.topk(logits, k=k_value, dim=1).indices.cpu().numpy()
-            
-            # Check if true label is in top-3
-            for i, label in enumerate(labels):
-                if label in top3_preds[i]:
-                    top3_correct += 1
+        # Mark as complete
+        progress.update(top3_task, description="[green]Top-3 accuracy computed!")
     
     top3_accuracy = top3_correct / len(test_dataset)
+    print_status(f"Top-3 accuracy: {top3_accuracy:.3f}", "success")
     
     # Create confusion matrix
     cm = confusion_matrix(all_labels, all_preds)
@@ -210,7 +248,7 @@ def compute_metrics(model, test_dataset, id_to_label, device):
         'label_map': label_map
     }
 
-def perform_error_analysis(metrics, test_df, run_dir=None, output_dir=None):
+def perform_error_analysis(metrics, test_df, run_dir=None, output_dir=None, config=None):
     """
     Perform error analysis
     
@@ -219,10 +257,21 @@ def perform_error_analysis(metrics, test_df, run_dir=None, output_dir=None):
         test_df (pd.DataFrame): Test data
         run_dir (str): Existing run directory to use (prioritized if provided)
         output_dir (str): Output base directory (used only if run_dir not provided)
+        config (dict): Configuration dictionary
         
     Returns:
         tuple: (error_dir, metrics_dict) - Path to error analysis directory and metrics summary
     """
+    # Import utils for progress tracking
+    from src.utils import print_status, print_section_header
+    
+    # Load config if not provided
+    if config is None:
+        config = load_config("config.yaml")
+        
+    # Display error analysis section header
+    print_section_header("Error Analysis")
+    print_status("Starting detailed error analysis...", "info")
     # Determine run directory
     if run_dir is None:
         if output_dir is None:
@@ -260,6 +309,63 @@ def perform_error_analysis(metrics, test_df, run_dir=None, output_dir=None):
         
         misclassified_df['true_bcea_code'] = [label_map[i]['true'] for i in misclassified_indices]
         misclassified_df['pred_bcea_code'] = [label_map[i]['pred'] for i in misclassified_indices]
+        
+        # Load BCEA reference data for descriptions if available
+        try:
+            bcea_ref_path = os.path.join(config.get('data', {}).get('reference_dir', 'data/reference'), 'bcea_ref.csv')
+            if os.path.exists(bcea_ref_path):
+                bcea_ref = pd.read_csv(bcea_ref_path)
+                
+                # Convert all BCEA codes to strings for consistent matching
+                bcea_ref['bcea_code_str'] = bcea_ref['bcea_code'].astype(str)
+                misclassified_df['true_bcea_code_str'] = misclassified_df['true_bcea_code'].astype(str)
+                misclassified_df['pred_bcea_code_str'] = misclassified_df['pred_bcea_code'].astype(str)
+                
+                # Create mappings from string BCEA codes to descriptions
+                bcea_desc_map = dict(zip(bcea_ref['bcea_code_str'], bcea_ref['short_description']))
+                
+                # Add true and predicted descriptions using string keys
+                misclassified_df['true_description'] = misclassified_df['true_bcea_code_str'].map(
+                    lambda x: bcea_desc_map.get(x, "No description available")
+                )
+                misclassified_df['pred_description'] = misclassified_df['pred_bcea_code_str'].map(
+                    lambda x: bcea_desc_map.get(x, "No description available")
+                )
+                
+                # Remove the temporary string columns
+                misclassified_df = misclassified_df.drop(columns=['true_bcea_code_str', 'pred_bcea_code_str'])
+                
+                # Reorder and filter columns as specified
+                if 'combined_text' in misclassified_df.columns:
+                    misclassified_df = misclassified_df.drop(columns=['combined_text'])
+                
+                # Define the desired column order
+                column_order = [
+                    'bus_name',
+                    'description',
+                    'pred_bcea_code',
+                    'pred_description',
+                    'true_bcea_code',
+                    'true_description'
+                ]
+                
+                # Make sure all columns exist (handle the case where bus_name might be missing)
+                for col in column_order:
+                    if col not in misclassified_df.columns and col != 'bus_name':
+                        misclassified_df[col] = ""
+                
+                # For bus_name specifically, add if missing
+                if 'bus_name' not in misclassified_df.columns:
+                    misclassified_df['bus_name'] = ""
+                
+                # Select and reorder columns
+                misclassified_df = misclassified_df[
+                    [col for col in column_order if col in misclassified_df.columns]
+                ]
+                
+                logging.info(f"Added BCEA descriptions from reference file: {bcea_ref_path}")
+        except Exception as e:
+            logging.warning(f"Could not add BCEA descriptions: {e}")
         
         # Save all misclassifications
         all_misclassified_path = os.path.join(error_dir, 'all_misclassifications.csv')
@@ -343,12 +449,17 @@ def perform_error_analysis(metrics, test_df, run_dir=None, output_dir=None):
     with open(metrics_path, 'w') as f:
         json.dump(metrics_dict, f, indent=2)
     logging.info(f"Metrics saved to {metrics_path}")
+    print_status(f"Metrics saved to JSON file", "success")
     
     # Save classification report
     report_path = os.path.join(error_dir, 'classification_report.json')
     with open(report_path, 'w') as f:
         json.dump(metrics['classification_report'], f, indent=2)
     logging.info(f"Classification report saved to {report_path}")
+    print_status(f"Classification report generated", "success")
+    
+    # Final success message for error analysis
+    print_status(f"Error analysis completed successfully", "success")
     
     # Create a summary plot
     plt.figure(figsize=(10, 6))
@@ -445,7 +556,7 @@ def evaluate_model_with_run_dir(config, model=None, tokenizer=None, id_to_label=
         
         # Perform error analysis
         logging.info("Performing error analysis")
-        error_dir, eval_metrics = perform_error_analysis(metrics, test_df, run_dir=run_dir)
+        error_dir, eval_metrics = perform_error_analysis(metrics, test_df, run_dir=run_dir, config=config)
         
         # Generate HTML report
         logging.info("Generating HTML report")
@@ -485,6 +596,13 @@ def generate_html_report(metrics, error_dir, run_dir, id_to_label=None, config=N
     import base64
     import io
     from datetime import datetime
+    
+    # Import utils for progress tracking
+    from src.utils import print_status, print_section_header
+    
+    # Show section header
+    print_section_header("HTML Report Generation")
+    print_status("Creating interactive HTML evaluation report...", "info")
     
     # Create timestamp
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -696,8 +814,9 @@ def generate_html_report(metrics, error_dir, run_dir, id_to_label=None, config=N
         # Check if combined_text is available
         has_combined_text = 'combined_text' in misclass_df.columns
         has_bus_name = 'bus_name' in misclass_df.columns
+        has_descriptions = 'true_description' in misclass_df.columns
         
-        # Create table header with conditional columns
+        # Create table header with consistent column order matching the CSV
         header = """
                 <table>
                     <thead>
@@ -714,15 +833,29 @@ def generate_html_report(metrics, error_dir, run_dir, id_to_label=None, config=N
                             <th>Description</th>
         """
         
-        # Add combined_text header if available
-        if has_combined_text:
+        # No longer showing combined text
+        
+        header += """
+                            <th>Predicted BCEA Code</th>
+        """
+        
+        # Add predicted description header if available
+        if has_descriptions:
             header += """
-                            <th>Combined Text</th>
+                            <th>Predicted BCEA Description</th>
             """
         
         header += """
                             <th>True BCEA Code</th>
-                            <th>Predicted BCEA Code</th>
+        """
+        
+        # Add true description header if available
+        if has_descriptions:
+            header += """
+                            <th>True BCEA Description</th>
+            """
+        
+        header += """
                         </tr>
                     </thead>
                     <tbody>
@@ -756,20 +889,39 @@ def generate_html_report(metrics, error_dir, run_dir, id_to_label=None, config=N
                             <td>{description}</td>
             """
             
-            # Add combined_text if available
-            if has_combined_text:
-                combined_text = row['combined_text']
-                # Limit combined_text length
-                if len(combined_text) > 100:
-                    combined_text = combined_text[:97] + "..."
+            # No longer showing combined_text
+            
+            # Add the predicted code
+            row_content += f"""
+                            <td>{row['pred_bcea_code']}</td>
+            """
+            
+            # Add predicted description if available
+            if has_descriptions:
+                pred_desc = row['pred_description']
+                # Limit description length
+                if len(pred_desc) > 70:
+                    pred_desc = pred_desc[:67] + "..."
                 row_content += f"""
-                            <td>{combined_text}</td>
+                            <td>{pred_desc}</td>
                 """
             
-            # Add the codes
+            # Add the true code
             row_content += f"""
                             <td>{row['true_bcea_code']}</td>
-                            <td>{row['pred_bcea_code']}</td>
+            """
+            
+            # Add true description if available
+            if has_descriptions:
+                true_desc = row['true_description']
+                # Limit description length
+                if len(true_desc) > 70:
+                    true_desc = true_desc[:67] + "..."
+                row_content += f"""
+                            <td>{true_desc}</td>
+                """
+            
+            row_content += """
                         </tr>
             """
             
@@ -851,6 +1003,7 @@ def generate_html_report(metrics, error_dir, run_dir, id_to_label=None, config=N
         f.write(html_content)
     
     logging.info(f"HTML evaluation report saved to {report_path}")
+    print_status(f"HTML report saved to {report_path}", "success")
     
     return report_path
 
@@ -884,25 +1037,35 @@ def evaluate_model(config):
 
 def run_evaluation():
     """Run evaluation pipeline"""
+    # Import utils for progress tracking and display
+    from src.utils import print_status, print_section_header, format_metrics_summary
+    
+    # Start with a section header
+    print_section_header("BCEA Model Evaluation")
+    
     # Load config
     config = load_config("config.yaml")
+    print_status("Configuration loaded successfully", "success")
     
     # Evaluate model
+    print_status("Starting model evaluation process", "info")
     metrics, report_path = evaluate_model(config)
     
     # Create a report output
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    report = (
-        f"=== BCEA Model Evaluation Report ===\n"
-        f"Time: {timestamp}\n"
-        f"Accuracy: {metrics['accuracy']:.3f}\n"
-        f"Macro F1 Score: {metrics['macro_f1']:.3f}\n"
-        f"Weighted F1 Score: {metrics['weighted_f1']:.3f}\n"
-        f"Top-3 Accuracy: {metrics['top3_accuracy']:.3f}\n"
-        f"HTML Report: {report_path}\n"
-        f"=== End Report ===\n"
-    )
-    print(report)
+    
+    # Display results section
+    print_section_header("Evaluation Results")
+    
+    # Format for display
+    print_status(f"Accuracy: {metrics['accuracy']:.4f}", "info")
+    print_status(f"Macro F1 Score: {metrics['macro_f1']:.4f}", "info")
+    print_status(f"Weighted F1 Score: {metrics['weighted_f1']:.4f}", "info")
+    print_status(f"Top-3 Accuracy: {metrics['top3_accuracy']:.4f}", "info")
+    print_status(f"HTML Report: {report_path}", "info")
+    
+    # Final success message
+    print_status("Evaluation completed successfully", "success")
     
     logging.info(f"Evaluation completed successfully. HTML report saved to {report_path}")
     

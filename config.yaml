@@ -3,6 +3,7 @@ data:
   processed_dir: "data/processed/"
   mappings_dir: "data/mappings/"
   review_dir: "data/review/"
+  reference_dir: "data/reference/"
   max_samples: 280000  # Set to a number to limit training data size (e.g., 10000)
   use_business_name: true  # Whether to use business name as input in addition to description
   text_separator: " | "  # Separator between business name and description

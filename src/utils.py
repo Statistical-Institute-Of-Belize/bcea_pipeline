@@ -59,7 +59,14 @@ def format_metrics_summary(metrics):
     lines = []
     lines.append("Key Metrics:")
     lines.append(f"  • Accuracy: {metrics.get('accuracy', 0):.4f}")
-    lines.append(f"  • F1 Score: {metrics.get('f1', 0):.4f}")
+    
+    # Use macro F1 and weighted F1 if available, otherwise fall back to just F1
+    if 'macro_f1' in metrics and 'weighted_f1' in metrics:
+        lines.append(f"  • Macro F1 Score: {metrics.get('macro_f1', 0):.4f}")
+        lines.append(f"  • Weighted F1 Score: {metrics.get('weighted_f1', 0):.4f}")
+    else:
+        lines.append(f"  • F1 Score: {metrics.get('f1', 0):.4f}")
+        
     lines.append(f"  • Top-3 Accuracy: {metrics.get('top3_accuracy', 0):.4f}")
     
     if 'misclassification_rate' in metrics:
