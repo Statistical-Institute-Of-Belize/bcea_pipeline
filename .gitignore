@@ -63,5 +63,8 @@ models/runs/
 temp/
 tmp/
 
+# MkDocs build output
+site/
+
 # Specific to our project
 __MACOSX/
