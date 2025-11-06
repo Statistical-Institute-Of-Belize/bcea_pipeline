@@ -11,13 +11,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
 import yaml
-import sys
-from pathlib import Path
 
-# Add the parent directory to system path to import utils
-sys.path.append(str(Path(__file__).parent.parent))
-from src.utils import load_config
-from src.model import BCEADataset
+from .utils import load_config
+from .model import BCEADataset
 
 def load_test_data(config):
     """
@@ -103,7 +99,7 @@ def compute_metrics(model, test_dataset, id_to_label, device):
         dict: Metrics and predictions
     """
     # Import utils for progress tracking
-    from src.utils import create_rich_progress, print_status
+    from .utils import create_rich_progress, print_status
     
     # Create DataLoader
     batch_size = 16
@@ -263,7 +259,7 @@ def perform_error_analysis(metrics, test_df, run_dir=None, output_dir=None, conf
         tuple: (error_dir, metrics_dict) - Path to error analysis directory and metrics summary
     """
     # Import utils for progress tracking
-    from src.utils import print_status, print_section_header
+    from .utils import print_status, print_section_header
     
     # Load config if not provided
     if config is None:
@@ -507,19 +503,20 @@ def evaluate_model_with_run_dir(config, model=None, tokenizer=None, id_to_label=
         else:
             test_df, _ = load_test_data(config)
         logging.info(f"Loaded {len(test_df)} test records")
-        
+
         # Ensure id_to_label keys are strings
         id_to_label = {str(k): v for k, v in id_to_label.items()}
-        
+
+        # Cache model directory for reuse across branches
+        model_dir = config['output']['best_model_dir']
+
         # Load model if not provided
         if model is None:
-            model_dir = config['output']['best_model_dir']
             model = AutoModelForSequenceClassification.from_pretrained(model_dir)
             logging.info(f"Loaded model from {model_dir}")
-        
+
         # Prepare dataset and tokenizer if needed
         if tokenizer is None:
-            model_dir = config['output']['best_model_dir']
             test_dataset, tokenizer = prepare_dataset(
                 test_df,
                 config['model']['max_seq_length'],
@@ -598,7 +595,7 @@ def generate_html_report(metrics, error_dir, run_dir, id_to_label=None, config=N
     from datetime import datetime
     
     # Import utils for progress tracking
-    from src.utils import print_status, print_section_header
+    from .utils import print_status, print_section_header
     
     # Show section header
     print_section_header("HTML Report Generation")
@@ -1035,16 +1032,17 @@ def evaluate_model(config):
     
     return metrics, report_path
 
-def run_evaluation():
+def run_evaluation(config=None):
     """Run evaluation pipeline"""
     # Import utils for progress tracking and display
-    from src.utils import print_status, print_section_header, format_metrics_summary
+    from .utils import print_status, print_section_header, format_metrics_summary
     
     # Start with a section header
     print_section_header("BCEA Model Evaluation")
     
     # Load config
-    config = load_config("config.yaml")
+    if config is None:
+        config = load_config("config.yaml")
     print_status("Configuration loaded successfully", "success")
     
     # Evaluate model

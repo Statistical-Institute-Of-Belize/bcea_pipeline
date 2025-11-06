@@ -1,6 +1,5 @@
-import sys
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 import uvicorn
@@ -60,12 +59,6 @@ async def health_check():
 
 def start():
     """Run the API server using uvicorn."""
-    # Get API directory path
-    api_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Add project root to Python path
-    sys.path.append(os.path.dirname(api_dir))
-    
     # Start uvicorn server
     uvicorn.run(
         "api.main:app",

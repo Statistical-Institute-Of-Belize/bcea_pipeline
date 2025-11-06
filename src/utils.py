@@ -6,6 +6,7 @@ from rich.logging import RichHandler
 from rich.console import Console
 from rich.progress import Progress, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 import psutil
+import pandas as pd
 
 def print_status(message, status="info", indent=0):
     """
@@ -74,6 +75,46 @@ def format_metrics_summary(metrics):
     
     return "\n".join(lines)
 
+def _normalize_config(config):
+    """Normalize configuration structure for backward compatibility."""
+    data_cfg = config.setdefault('data', {})
+    model_cfg = config.setdefault('model', {})
+    training_cfg = config.setdefault('training', {})
+    logging_cfg = config.setdefault('logging', {})
+
+    aliases = (
+        ('batch_size', None),
+        ('epochs', None),
+        ('learning_rate', None),
+        ('gradient_accumulation_steps', 1),
+        ('mixed_precision', model_cfg.get('mixed_precision', False)),
+        ('early_stopping_patience', model_cfg.get('early_stopping_patience')),
+    )
+
+    for key, default in aliases:
+        if key not in training_cfg and key in model_cfg:
+            training_cfg[key] = model_cfg[key]
+        elif key not in training_cfg and default is not None:
+            training_cfg[key] = default
+
+    if 'memory' not in training_cfg and 'memory' in model_cfg:
+        training_cfg['memory'] = model_cfg['memory']
+
+    training_cfg.setdefault('enable_optimizations', False)
+    training_cfg.setdefault('force_update_best', False)
+    training_cfg.setdefault('subset_threshold', None)
+    training_cfg.setdefault('subset_size', None)
+    training_cfg.setdefault('subset_seed', 42)
+    training_cfg.setdefault('subset_force', False)
+
+    data_cfg.setdefault('corrections_dir', 'data/corrections/')
+    data_cfg.setdefault('review_dir', 'data/review/')
+
+    config.setdefault('prediction', {}).setdefault('explain', False)
+
+    return config
+
+
 def load_config(config_path="config.yaml"):
     """
     Load and return the YAML config file as a dictionary
@@ -91,13 +132,15 @@ def load_config(config_path="config.yaml"):
     try:
         with open(config_path, 'r') as file:
             config = yaml.safe_load(file)
-        
+            if config is None:
+                config = {}
+
         # Only log if logging is already configured
         if logging.getLogger().handlers:
             logging.info("Config loaded")
             print_status("Config loaded", "success")
-            
-        return config
+
+        return _normalize_config(config)
     except yaml.YAMLError as e:
         raise ValueError(f"Error parsing config file: {e}")
     except Exception as e:
@@ -273,9 +316,42 @@ def check_memory_availability(required_gb=None, percentage=0.8):
         if available_gb < (total_gb * (1 - percentage)):
             logging.warning(f"High memory usage: {available_gb:.2f}GB available, recommended to have at least {max_usable_gb:.2f}GB")
             return False
-    
+
     logging.info(f"Memory check passed: {available_gb:.2f}GB available")
     return True
+
+
+def load_bcea_reference(reference_path, code_column='bcea_code', description_column='short_description'):
+    """Load BCEA code descriptions from CSV and return a mapping."""
+    if not reference_path:
+        logging.warning("No reference path provided for BCEA descriptions")
+        return {}
+
+    if not os.path.exists(reference_path):
+        logging.warning("BCEA reference file not found: %s", reference_path)
+        return {}
+
+    try:
+        ref_df = pd.read_csv(reference_path)
+    except Exception as exc:
+        logging.warning("Failed to load BCEA reference file %s: %s", reference_path, exc)
+        return {}
+
+    missing = {column for column in (code_column, description_column) if column not in ref_df.columns}
+    if missing:
+        logging.warning(
+            "BCEA reference missing required columns %s in %s",
+            ", ".join(sorted(missing)),
+            reference_path,
+        )
+        return {}
+
+    ref_df = ref_df[[code_column, description_column]].dropna()
+    ref_df[code_column] = ref_df[code_column].astype(str)
+    mapping = dict(zip(ref_df[code_column], ref_df[description_column]))
+
+    logging.info("Loaded %s BCEA code descriptions", len(mapping))
+    return mapping
 
 class MPSGradScaler:
     """

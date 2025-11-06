@@ -1,0 +1,60 @@
+site_name: BCEA Pipeline Documentation
+site_description: Documentation for the Belize Classification of Economic Activities prediction pipeline
+site_author: BCEA Pipeline Team
+repo_url: https://github.com/gianaguilar/bcea_pipeline
+repo_name: gianaguilar/bcea_pipeline
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - User Guide: users.md
+  - Developer Guide: developers.md
+  - API Reference: api.md
+  - Configuration: configuration.md
+  - Deployment: deployment.md
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/gianaguilar/bcea_pipeline

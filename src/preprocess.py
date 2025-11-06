@@ -5,12 +5,8 @@ import logging
 import pandas as pd
 from sklearn.model_selection import train_test_split
 import yaml
-import sys
-from pathlib import Path
 
-# Add the parent directory to system path to import utils
-sys.path.append(str(Path(__file__).parent.parent))
-from src.utils import load_config, check_memory_availability
+from .utils import load_config, check_memory_availability
 
 def clean_text(texts):
     """
@@ -311,9 +307,10 @@ def preprocess_data(input_csv, config):
         config (dict): Configuration dictionary
     """
     # Check memory availability
+    memory_cfg = config.get('training', {}).get('memory') or config.get('model', {}).get('memory', {})
     check_memory_availability(
-        required_gb=config.get('model', {}).get('memory', {}).get('min_required_gb'),
-        percentage=config.get('model', {}).get('memory', {}).get('max_usage_percentage', 0.8)
+        required_gb=memory_cfg.get('min_required_gb'),
+        percentage=memory_cfg.get('max_usage_percentage', 0.8)
     )
     
     # Load CSV file

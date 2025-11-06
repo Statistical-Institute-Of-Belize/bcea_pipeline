@@ -6,14 +6,9 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from datetime import datetime
-import yaml
-import sys
-from pathlib import Path
 
-# Add the parent directory to system path to import utils
-sys.path.append(str(Path(__file__).parent.parent))
-from src.utils import load_config, check_memory_availability
-from src.model import BCEADataset, get_device
+from .utils import load_config, check_memory_availability, load_bcea_reference
+from .model import BCEADataset, get_device
 
 def load_model_and_tokenizer(model_dir):
     """
@@ -173,8 +168,8 @@ def flag_unknown_codes(predictions_df, review_dir):
     # Create review directory if it doesn't exist
     os.makedirs(review_dir, exist_ok=True)
     
-    # Flag unknown codes (not in our original label mapping)
-    unknown_mask = predictions_df['bcea_code'] == 'Unknown'
+    code_column = 'predicted_code' if 'predicted_code' in predictions_df.columns else 'bcea_code'
+    unknown_mask = predictions_df[code_column] == 'Unknown'
     unknown_df = predictions_df[unknown_mask].copy()
     
     # Save unknown codes to CSV
@@ -212,233 +207,179 @@ def get_confidence_grade(confidence):
     else:
         return "very_high"
 
-def load_bcea_reference():
-    """
-    Load BCEA reference data with code descriptions
-    
-    Returns:
-        dict: Mapping of BCEA codes to their descriptions
-    """
-    ref_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 
-                           'data/reference/bcea_ref.csv')
-    
-    if not os.path.exists(ref_path):
-        logging.warning(f"BCEA reference file not found: {ref_path}")
-        return {}
-        
-    try:
-        # Load reference data
-        ref_df = pd.read_csv(ref_path)
-        
-        # Ensure required columns exist
-        if 'bcea_code' not in ref_df.columns or 'short_description' not in ref_df.columns:
-            logging.warning("BCEA reference file missing required columns")
-            return {}
-            
-        # Print first few rows for debugging
-        logging.info("BCEA reference data sample:")
-        for i, row in ref_df.head(3).iterrows():
-            logging.info(f"  Code: '{row['bcea_code']}', Description: '{row['short_description']}'")
-        
-        # Convert codes to strings for consistent lookup
-        ref_df['bcea_code'] = ref_df['bcea_code'].astype(str)
-        
-        # Create mapping dictionary
-        code_to_desc = dict(zip(ref_df['bcea_code'], ref_df['short_description']))
-        logging.info(f"Loaded {len(code_to_desc)} BCEA code descriptions")
-        
-        # Print a few sample mappings
-        sample_keys = list(code_to_desc.keys())[:3]
-        for key in sample_keys:
-            logging.info(f"  Sample mapping: '{key}' -> '{code_to_desc[key]}'")
-            
-        return code_to_desc
-        
-    except Exception as e:
-        logging.warning(f"Error loading BCEA reference file: {e}")
-        return {}
+def _resolve_reference_path(config):
+    """Return the absolute path to the BCEA reference CSV."""
+    project_root = os.path.dirname(os.path.dirname(__file__))
+    data_cfg = config.get('data', {}) if config else {}
 
-def predict_batch(texts, model, tokenizer, id_to_label, config, original_df=None):
-    """
-    Predict BCEA codes for a batch of texts
-    
-    Args:
-        texts (list): List of text descriptions
-        model: Hugging Face model
-        tokenizer: Hugging Face tokenizer
-        id_to_label (dict): ID to label mapping
-        config (dict): Configuration dictionary
-        original_df (pd.DataFrame, optional): Original DataFrame to preserve all columns
-        
-    Returns:
-        pd.DataFrame: DataFrame with predictions
-    """
-    # Check memory availability
+    reference_file = data_cfg.get('reference_file')
+    if reference_file:
+        return reference_file if os.path.isabs(reference_file) else os.path.join(project_root, reference_file)
+
+    reference_dir = data_cfg.get('reference_dir')
+    if reference_dir:
+        base_dir = reference_dir if os.path.isabs(reference_dir) else os.path.join(project_root, reference_dir)
+        return os.path.join(base_dir, 'bcea_ref.csv')
+
+    return os.path.join(project_root, 'data', 'reference', 'bcea_ref.csv')
+
+
+def _map_prediction_rows(top_predictions, confidence_scores, id_to_label, bcea_descriptions):
+    """Convert raw classifier outputs into structured prediction rows."""
+    rows = []
+    unknown_primary = 0
+
+    for indices, scores in zip(top_predictions, confidence_scores):
+        mapped = []
+        for class_id, score in zip(indices, scores):
+            code = id_to_label.get(class_id)
+            if code:
+                description = bcea_descriptions.get(code, f"No description available for {code}")
+            else:
+                code = 'Unknown'
+                description = 'Unknown code'
+            mapped.append({'code': code, 'description': description, 'confidence': float(score)})
+
+        while len(mapped) < 3:
+            mapped.append({'code': 'Unknown', 'description': 'Unknown code', 'confidence': 0.0})
+
+        if mapped[0]['code'] == 'Unknown':
+            unknown_primary += 1
+
+        rows.append(mapped[:3])
+
+    return rows, unknown_primary
+
+
+
+
+def predict_batch(texts, model, tokenizer, id_to_label, config, original_df=None, explain=False):
+    """Predict BCEA codes for a batch of texts."""
     check_memory_availability(
         required_gb=config.get('model', {}).get('memory', {}).get('min_required_gb'),
         percentage=config.get('model', {}).get('memory', {}).get('max_usage_percentage', 0.8)
     )
-    
-    # Load BCEA reference data for descriptions
-    bcea_descriptions = load_bcea_reference()
-    
-    # Extract business names if available from the original dataframe
+
+    reference_path = _resolve_reference_path(config)
+    bcea_descriptions = load_bcea_reference(reference_path)
+    if not bcea_descriptions:
+        logging.warning("BCEA reference file missing or empty at %s", reference_path)
+
+    if explain:
+        logging.warning("Explanation generation is not yet supported for the BCEA pipeline; continuing without it")
+
     business_names = None
     if original_df is not None and 'bus_name' in original_df.columns:
         business_names = original_df['bus_name'].tolist()
-        logging.info(f"Using business name data for {len(business_names)} records")
-    
-    # Prepare dataset
+        logging.info("Using business name data for %s records", len(business_names))
+
     max_seq_length = config['model']['max_seq_length']
-    dataset = prepare_prediction_dataset(texts, tokenizer, max_seq_length, 
-                                        business_names=business_names, 
-                                        config=config)
-    
-    # Get the appropriate device
+    dataset = prepare_prediction_dataset(
+        texts,
+        tokenizer,
+        max_seq_length,
+        business_names=business_names,
+        config=config
+    )
+
     device = get_device(config)
     model.to(device)
-    
-    # Get batch size from config
-    batch_size = config['model']['batch_size']
-    
-    # Make predictions with top 3 results
-    top_predictions, confidence_scores = predict_all(model, dataset, device, batch_size, top_k=3)
-    
-    # Map predictions to BCEA codes with confidence scores
-    bcea_codes = []
-    bcea_descriptions_list = []
-    confidences = []
-    confidence_grades = []
-    alt_bcea_codes_1 = []
-    alt_descriptions_1 = []
-    alt_confidences_1 = []
-    alt_bcea_codes_2 = []
-    alt_descriptions_2 = []
-    alt_confidences_2 = []
-    unknown_count = 0
-    
-    for preds, scores in zip(top_predictions, confidence_scores):
-        # Process main prediction (first in the list)
-        pred_str = preds[0]
-        confidence = scores[0]
-        
-        if pred_str in id_to_label:
-            code = id_to_label[pred_str]
-            bcea_codes.append(code)
-            # Add description if available (with debugging info)
-            description = bcea_descriptions.get(code, f"No description available for {code}")
-            # Log some samples for debugging
-            if len(bcea_codes) <= 3:
-                logging.info(f"Looking up description for code '{code}', found: '{description}'")
-                if code not in bcea_descriptions:
-                    logging.info(f"Available keys sample: {list(bcea_descriptions.keys())[:5]}")
-            bcea_descriptions_list.append(description)
-        else:
-            unknown_count += 1
-            bcea_codes.append('Unknown')
-            bcea_descriptions_list.append("Unknown code")
-            logging.warning(f"Unknown label ID: {pred_str}")
-        
-        confidences.append(confidence)
-        confidence_grades.append(get_confidence_grade(confidence))
-        
-        # Process first alternative prediction
-        if len(preds) > 1:
-            alt_pred_str = preds[1]
-            alt_confidence = scores[1]
-            if alt_pred_str in id_to_label:
-                code = id_to_label[alt_pred_str]
-                alt_bcea_codes_1.append(code)
-                # Add description if available
-                description = bcea_descriptions.get(code, f"No description available for {code}")
-                # Log first few for debugging
-                if len(alt_bcea_codes_1) <= 1:
-                    logging.info(f"Alt1: Looking up description for code '{code}', found: '{description}'")
-                alt_descriptions_1.append(description)
-            else:
-                alt_bcea_codes_1.append('Unknown')
-                alt_descriptions_1.append("Unknown code")
-            alt_confidences_1.append(alt_confidence)
-        else:
-            alt_bcea_codes_1.append('Unknown')
-            alt_descriptions_1.append("Unknown code")
-            alt_confidences_1.append(0.0)
-        
-        # Process second alternative prediction
-        if len(preds) > 2:
-            alt_pred_str = preds[2]
-            alt_confidence = scores[2]
-            if alt_pred_str in id_to_label:
-                code = id_to_label[alt_pred_str]
-                alt_bcea_codes_2.append(code)
-                # Add description if available
-                description = bcea_descriptions.get(code, f"No description available for {code}")
-                # Log first few for debugging
-                if len(alt_bcea_codes_2) <= 1:
-                    logging.info(f"Alt2: Looking up description for code '{code}', found: '{description}'")
-                alt_descriptions_2.append(description)
-            else:
-                alt_bcea_codes_2.append('Unknown')
-                alt_descriptions_2.append("Unknown code")
-            alt_confidences_2.append(alt_confidence)
-        else:
-            alt_bcea_codes_2.append('Unknown')
-            alt_descriptions_2.append("Unknown code")
-            alt_confidences_2.append(0.0)
-    
+
+    training_cfg = config.get('training', {}) if config else {}
+    batch_size = training_cfg.get('batch_size', config.get('model', {}).get('batch_size', 32))
+    top_predictions, confidence_scores = predict_all(
+        model, dataset, device, batch_size, top_k=3
+    )
+
+    mapped_rows, unknown_count = _map_prediction_rows(
+        top_predictions, confidence_scores, id_to_label, bcea_descriptions
+    )
+
+    if mapped_rows:
+        sample = mapped_rows[0][0]
+        logging.info("Sample prediction mapping: %s -> %s", sample['code'], sample['description'])
+
+    primary_codes = [row[0]['code'] for row in mapped_rows]
+    primary_descriptions = [row[0]['description'] for row in mapped_rows]
+    confidences = [row[0]['confidence'] for row in mapped_rows]
+    confidence_grades = [get_confidence_grade(score) for score in confidences]
+
+    alt_codes_1 = [row[1]['code'] for row in mapped_rows]
+    alt_desc_1 = [row[1]['description'] for row in mapped_rows]
+    alt_conf_1 = [row[1]['confidence'] for row in mapped_rows]
+
+    alt_codes_2 = [row[2]['code'] for row in mapped_rows]
+    alt_desc_2 = [row[2]['description'] for row in mapped_rows]
+    alt_conf_2 = [row[2]['confidence'] for row in mapped_rows]
+
+    prediction_cfg = config.get('prediction', {}) if config else {}
+    confidence_threshold = prediction_cfg.get('confidence_threshold')
+    if confidence_threshold is None:
+        confidence_threshold = config.get('model', {}).get('confidence_threshold', 0.0)
+
+    fallback_flags = []
+    final_codes = []
+    for code, confidence in zip(primary_codes, confidences):
+        fallback = bool(confidence_threshold) and confidence < confidence_threshold
+        fallback_flags.append(fallback)
+        final_codes.append(code)
+
     if unknown_count > 0:
-        logging.warning(f"Found {unknown_count} predictions without matching BCEA codes")
-    
-    # Create predictions DataFrame
-    # Start with original columns if provided
+        logging.warning("Found %s predictions without matching BCEA codes", unknown_count)
+
     if original_df is not None:
         predictions_df = original_df.copy()
     else:
         predictions_df = pd.DataFrame({'description': texts})
-    
-    # Add prediction columns
-    predictions_df['bcea_code'] = bcea_codes
-    predictions_df['industry_description'] = bcea_descriptions_list
+
+    predictions_df['predicted_code'] = final_codes
+    predictions_df['predicted_description'] = primary_descriptions
     predictions_df['confidence'] = confidences
     predictions_df['confidence_grade'] = confidence_grades
-    
-    # Add alternative predictions
-    predictions_df['alt_bcea_code_1'] = alt_bcea_codes_1
-    predictions_df['alt_industry_description_1'] = alt_descriptions_1
-    predictions_df['alt_confidence_1'] = alt_confidences_1
-    
-    predictions_df['alt_bcea_code_2'] = alt_bcea_codes_2
-    predictions_df['alt_industry_description_2'] = alt_descriptions_2
-    predictions_df['alt_confidence_2'] = alt_confidences_2
-    
-    # Generate timestamp for output file
+    predictions_df['is_fallback'] = fallback_flags
+    predictions_df['alternative_1'] = alt_codes_1
+    predictions_df['alternative_1_description'] = alt_desc_1
+    predictions_df['alternative_1_confidence'] = alt_conf_1
+    predictions_df['alternative_2'] = alt_codes_2
+    predictions_df['alternative_2_description'] = alt_desc_2
+    predictions_df['alternative_2_confidence'] = alt_conf_2
+
+    # Backwards-compatible columns
+    predictions_df['bcea_code'] = predictions_df['predicted_code']
+    predictions_df['industry_description'] = predictions_df['predicted_description']
+    predictions_df['alt_bcea_code_1'] = predictions_df['alternative_1']
+    predictions_df['alt_industry_description_1'] = predictions_df['alternative_1_description']
+    predictions_df['alt_confidence_1'] = predictions_df['alternative_1_confidence']
+    predictions_df['alt_bcea_code_2'] = predictions_df['alternative_2']
+    predictions_df['alt_industry_description_2'] = predictions_df['alternative_2_description']
+    predictions_df['alt_confidence_2'] = predictions_df['alternative_2_confidence']
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Save predictions with timestamp
     output_dir = config['data']['processed_dir']
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Generate output filename based on input filename if available
+
     input_file = config.get('current_input_file', 'predictions')
     base_filename = os.path.basename(input_file)
     filename_no_ext = os.path.splitext(base_filename)[0]
-    
+
     predictions_path = os.path.join(output_dir, f'{filename_no_ext}_predictions_{timestamp}.csv')
     predictions_df.to_csv(predictions_path, index=False)
-    
-    logging.info(f"Predicted {len(predictions_df)} codes")
-    logging.info(f"Predictions saved to: {predictions_path}")
+
+    logging.info("Predicted %s codes", len(predictions_df))
+    logging.info("Predictions saved to: %s", predictions_path)
     print(f"✓ Predictions saved to: {predictions_path}")
-    
-    # Flag unknown codes
+
     unknown_count = flag_unknown_codes(predictions_df, config['data']['review_dir'])
-    
+
     if unknown_count > 0:
-        logging.warning(f"Flagged {unknown_count} unknown BCEA codes for review")
-    
+        logging.warning("Flagged %s unknown BCEA codes for review", unknown_count)
+
     return predictions_df
 
-def predict_from_file(input_file, config):
+
+
+
+def predict_from_file(input_file, config, explain=False):
     """
     Predict BCEA codes from input file
     
@@ -479,9 +420,9 @@ def predict_from_file(input_file, config):
     model, tokenizer, id_to_label = load_model_and_tokenizer(config['output']['best_model_dir'])
     
     # Make predictions, preserving all original columns
-    return predict_batch(texts, model, tokenizer, id_to_label, config, original_df=df)
+    return predict_batch(texts, model, tokenizer, id_to_label, config, original_df=df, explain=explain)
 
-def run_prediction(input_file=None):
+def run_prediction(input_file=None, config=None, explain=False):
     """
     Run prediction pipeline
     
@@ -489,7 +430,8 @@ def run_prediction(input_file=None):
         input_file (str, optional): Path to input file. If None, use test.csv
     """
     # Load config
-    config = load_config("config.yaml")
+    if config is None:
+        config = load_config("config.yaml")
     
     # If no input file is provided, use test.csv
     if input_file is None:
@@ -500,7 +442,7 @@ def run_prediction(input_file=None):
     print(f"✓ Starting prediction on {input_file}")
     
     # Predict from file
-    predictions_df = predict_from_file(input_file, config)
+    predictions_df = predict_from_file(input_file, config, explain=explain)
     
     # Print summary
     print(f"✓ Successfully predicted {len(predictions_df)} BCEA codes")

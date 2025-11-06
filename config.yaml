@@ -4,51 +4,58 @@ data:
   mappings_dir: "data/mappings/"
   review_dir: "data/review/"
   reference_dir: "data/reference/"
-  max_samples: 280000  # Set to a number to limit training data size (e.g., 10000)
-  use_business_name: true  # Whether to use business name as input in addition to description
-  text_separator: " | "  # Separator between business name and description
+  corrections_dir: "data/corrections/"
+  max_samples: 280000  # Optional preprocessing sample cap
+  use_business_name: true
+  text_separator: " | "
+
 model:
-  # Model configuration - using smaller model for memory efficiency
-  name: "distilroberta-base"  # Much smaller model than roberta-base
-  max_seq_length: 160  # Reduced from 160 to save memory
-  batch_size: 32  # Reduced batch size for M3 Pro
+  name: "distilroberta-base"
+  max_seq_length: 160
+  device: "auto"  # auto, cpu, cuda, mps
+
+training:
+  batch_size: 32
   epochs: 10
   learning_rate: 3.5e-5
-  early_stopping_patience: 2  # Stop training if no improvement for this many epochs
-  gradient_accumulation_steps: 2  # Increased to reduce memory usage
-  mixed_precision: true  # Use mixed precision for faster training on Apple Silicon
-  device: "auto"  # auto, cpu, cuda, mps (Apple Silicon)
-  
-  # Memory optimizations
+  early_stopping_patience: 2
+  gradient_accumulation_steps: 2
+  mixed_precision: true
+  enable_optimizations: true
+  subset_threshold: 180000  # Apply subset sampling when dataset exceeds this size (optional)
+  subset_size: null         # Override to force a specific subset size
+  subset_seed: 42
+  force_update_best: false
   memory:
-    min_required_gb: 1.5  # Reduced from 2.0
-    max_usage_percentage: 0.5  # More conservative memory usage
-    cleanup_frequency: 25  # More frequent cleanup to prevent OOM
-  
-  # Dataset optimizations
-  dataset_opts:
-    lazy_loading: true  # Use lazy loading for large datasets
-  
-  # DataLoader optimizations
+    min_required_gb: 1.5
+    max_usage_percentage: 0.5
+    cleanup_frequency: 25
   dataloader_opts:
-    num_workers: 0  # Set to 0 to avoid worker process memory overhead
-    pin_memory: false  # Disable pin_memory to save memory
-    persistent_workers: false  # Since num_workers=0, not applicable
-    prefetch_factor: 2  # Number of samples loaded in advance by each worker
+    num_workers: 0
+    pin_memory: false
+    persistent_workers: false
+    prefetch_factor: 2
+
 logging:
   dir: "logs/"
   level: "INFO"
   style: "rich"
-  log_batch_frequency: 10  # Log every N batches during training
+  log_batch_frequency: 10
+
 output:
   model_dir: "models/"
   best_model_dir: "models/best_model/"
+
+prediction:
+  explain: false
+  confidence_threshold: 0.0
+
 evaluation:
-  auto_evaluate: true  # Run evaluation automatically after training
-  save_confusion_matrix: true  # Save confusion matrix visualization
-  save_class_performance: true  # Save per-class performance metrics
-  save_misclassifications: true  # Save misclassifications for error analysis
-  metrics_to_track:  # List of metrics to track and compare across runs
+  auto_evaluate: true
+  save_confusion_matrix: true
+  save_class_performance: true
+  save_misclassifications: true
+  metrics_to_track:
     - accuracy
     - f1
     - top3_accuracy

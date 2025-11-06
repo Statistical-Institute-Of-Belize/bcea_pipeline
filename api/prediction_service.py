@@ -1,14 +1,6 @@
 import torch
-import sys
-import os
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Any
 
-# Configure paths for imports
-script_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(script_dir)
-sys.path.append(project_root)
-
-# Import from the original predict.py to ensure consistency
 from src.predict import get_confidence_grade
 from src.model import get_device
 
