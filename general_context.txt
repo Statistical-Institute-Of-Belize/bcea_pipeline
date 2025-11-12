@@ -1,0 +1,148 @@
+Below is a detailed specification/plan for building a coding pipeline tailored to the BCEA (Belize Classification of Economic Activities) classification system, adapted from an assumed ISCO LLM instruction set. Since I don’t have your original ISCO LLM instructions, I’ll create a robust, general-purpose plan with your specified emphases on the nature of BCEA, a comprehensive label mapping strategy, and strong logging practices. This plan assumes a typical LLM-based classification pipeline and adjusts it for BCEA’s unique characteristics.
+
+---
+
+# Specification and Plan for BCEA Classification Pipeline
+
+## Overview
+The goal of this pipeline is to develop a machine learning model (likely an LLM-based classifier) to predict Belize Classification of Economic Activities (BCEA) codes from textual or structured input data. BCEA is a 5-digit classification system derived from the International Standard Industrial Classification (ISIC), extending ISIC’s 4-digit codes with an additional decimal digit for finer granularity (e.g., ISIC `1234` becomes BCEA `1234.1`, `1234.2`, etc.). This pipeline will process historic BCEA data, map labels consistently, and provide detailed, aesthetically pleasing logging throughout execution.
+
+---
+
+## Key Objectives
+1. **Accurate BCEA Classification**: Leverage the 5-digit BCEA structure (####.#) to classify economic activities with precision.
+2. **Robust Label Mapping**: Create a single, consistent id-to-label mapping for all BCEA codes in the training data, ensuring coherence across the pipeline.
+3. **Informative Logging**: Implement a logging system that is detailed, visually appealing, and useful for debugging and monitoring.
+
+---
+
+## 1. Nature of BCEA
+### Description
+- **BCEA vs. ISIC**: BCEA is a Belize-specific adaptation of ISIC. While it shares a foundational structure with ISIC’s 4-digit codes, BCEA introduces a fifth digit after a decimal point (e.g., `1234.1`, `1234.2`) to provide additional granularity. **BCEA is not equivalent to ISIC**; it is an extension tailored to Belize’s economic context.
+- **Code Format**: All BCEA codes in this pipeline must be represented as 5-digit codes in the format `####.#` (e.g., `0112.3`, `4520.1`). Any input or output deviating from this format should raise an error or warning in the logs.
+- **Scope**: The pipeline will exclusively work with BCEA’s 5-digit codes and will not fallback to or infer 4-digit ISIC codes unless explicitly required for mapping/validation purposes (e.g., cross-referencing with ISIC documentation).
+
+### Implementation Notes
+- Input validation will enforce the `####.#` format using regex (e.g., `^\d{4}\.\d$`).
+- Any preprocessing step must preserve or convert data into this format.
+
+---
+
+## 2. Pipeline Components
+
+### 2.1 Data Ingestion
+- **Input**: Historic BCEA dataset (assumed to include text descriptions of economic activities and their corresponding 5-digit BCEA codes).
+- **Format**: CSV, JSON, or similar structured data with columns like `description` and `bcea_code`.
+- **Validation**: Check that all BCEA codes match the `####.#` format. Log invalid entries with details (e.g., row number, value).
+- **Output**: Cleaned dataset ready for label mapping and model training.
+
+### 2.2 Label Mapping Strategy
+#### Overview
+The label mapping strategy is critical to ensure consistency and coherence across the pipeline. Past LLMs have struggled with inconsistent mappings, so we will create a **single, definitive id-to-label mapping** based on all unique BCEA codes in the training data. This mapping will be reused throughout preprocessing, training, and inference.
+
+#### Steps
+1. **Extract Unique BCEA Codes**:
+   - Scan the historic BCEA dataset to identify all unique 5-digit codes (e.g., `0112.3`, `4520.1`).
+   - Store these in a set to eliminate duplicates.
+   - Log the total number of unique codes found (e.g., “Found 1,245 unique BCEA codes”).
+
+2. **Assign Sequential IDs**:
+   - Assign each unique BCEA code a sequential integer ID (e.g., `0112.3` → `0`, `0112.4` → `1`, `4520.1` → `2`).
+   - Use a dictionary or lookup table for bidirectional mapping:
+     - `id_to_label`: `{0: "0112.3", 1: "0112.4", 2: "4520.1", ...}`
+     - `label_to_id`: `{"0112.3": 0, "0112.4": 1, "4520.1": 2, ...}`
+
+3. **Persist Mappings**:
+   - Save the mappings to a file (e.g., `bcea_mappings.json`) in the following format:
+     ```json
+     {
+       "id_to_label": {"0": "0112.3", "1": "0112.4", "2": "4520.1"},
+       "label_to_id": {"0112.3": "0", "0112.4": "1", "4520.1": "2"}
+     }
+     ```
+   - This file will be loaded at the start of every pipeline run to ensure consistency.
+
+4. **Validation**:
+   - Cross-check the mappings against the training data to ensure no codes are missed.
+   - Log any discrepancies (e.g., “Code 1234.5 in data but not in mapping”).
+
+5. **Handling Edge Cases**:
+   - **New Codes in Test/Inference**: If a new BCEA code appears outside the training data, log a warning and assign a temporary ID (e.g., `-1`) with a placeholder label (e.g., “Unknown”). Flag for manual review.
+   - **Ambiguity**: If a description maps to multiple BCEA codes in the training data, log the conflict and select the most frequent code (or use a tiebreaker rule, e.g., lowest numeric code).
+
+6. **Documentation**:
+   - Include a human-readable version of the mapping (e.g., CSV with `id`, `bcea_code`, `description`) for reference.
+   - Log the creation process with timestamps and statistics (e.g., “Mapping created with 1,245 codes on 2025-03-06 14:32:10”).
+
+#### Why This Works
+- **Consistency**: A single mapping avoids redefinition across pipeline stages.
+- **Scalability**: Sequential IDs simplify model training (e.g., as class indices in a softmax layer).
+- **Traceability**: Persistent storage and logging ensure transparency and reproducibility.
+
+### 2.3 Preprocessing
+- **Text Cleaning**: Normalize text descriptions (e.g., lowercase, remove punctuation) while preserving economic context.
+- **Label Encoding**: Convert BCEA codes to their corresponding IDs using the `label_to_id` mapping.
+- **Output**: Tokenized text and encoded labels ready for model input.
+
+### 2.4 Model Training
+- **Model**: Assume an LLM (e.g., BERT, RoBERTa) fine-tuned for multi-class classification.
+- **Input**: Tokenized descriptions.
+- **Output**: Predicted BCEA code IDs (mapped back to `####.#` format post-inference).
+- **Loss**: Cross-entropy loss over the number of unique BCEA codes.
+- **Logging**: Track metrics (e.g., accuracy, F1-score) per epoch with visually appealing progress bars.
+
+### 2.5 Inference
+- **Input**: New text descriptions.
+- **Output**: Predicted BCEA codes in `####.#` format, using the `id_to_label` mapping.
+- **Validation**: Ensure predictions conform to the 5-digit format; log anomalies.
+
+---
+
+## 3. Logging Strategy
+### Principles
+- **Informative**: Logs should provide actionable insights (e.g., errors, progress, statistics).
+- **Aesthetically Pleasing**: Use formatting (e.g., colors, separators) to enhance readability.
+- **Comprehensive**: Capture key events across all pipeline stages.
+
+### Implementation
+- **Library**: Use Python’s `logging` module with `rich` or `colorlog` for styled output.
+- **Levels**:
+  - `INFO`: General progress (e.g., “Starting data ingestion”, “Mapping 1,245 BCEA codes”).
+  - `WARNING`: Non-fatal issues (e.g., “Unknown code 9999.9 encountered”).
+  - `ERROR`: Fatal issues (e.g., “Invalid format in row 42: 1234”).
+  - `DEBUG`: Detailed diagnostics (e.g., “First 5 mappings: {0: 0112.3, 1: 0112.4}”).
+
+### Example Log Output
+```
+[2025-03-06 14:30:00] INFO  === Starting BCEA Pipeline ===
+[2025-03-06 14:30:01] INFO  Loaded 10,000 records from historic_bcea.csv
+[2025-03-06 14:30:02] INFO  Found 1,245 unique BCEA codes
+[2025-03-06 14:30:03] INFO  Mapping created: 0 -> 0112.3, 1 -> 0112.4, ...
+[2025-03-06 14:30:05] WARNING  Row 42 has invalid code '1234' (expected ####.#)
+[2025-03-06 14:32:00] INFO  Training started [Progress: ▓▓▓░░░░ 60%] - Epoch 3/5 - Loss: 0.234
+[2025-03-06 14:35:00] INFO  === Pipeline Completed Successfully ===
+```
+
+### Features
+- **Timestamps**: Precise tracking of events.
+- **Progress Bars**: Visual feedback during long operations (e.g., training).
+- **File Output**: Save logs to `bcea_pipeline.log` for posterity.
+- **Console Output**: Real-time monitoring with color-coded levels (e.g., green for INFO, yellow for WARNING).
+
+---
+
+## 4. Deliverables
+1. **Code**: Python scripts/modules for the pipeline (e.g., `data_ingestion.py`, `label_mapping.py`, `train.py`).
+2. **Mappings**: `bcea_mappings.json` and a human-readable CSV.
+3. **Logs**: `bcea_pipeline.log` with detailed execution history.
+4. **Model**: Trained LLM with BCEA classification capabilities.
+
+## 5. Timeline
+- **Week 1**: Data ingestion and label mapping.
+- **Week 2**: Preprocessing and logging setup.
+- **Week 3**: Model training and inference.
+- **Week 4**: Testing and refinement.
+
+---
+
+This plan emphasizes BCEA’s unique 5-digit structure, ensures a robust and consistent label mapping strategy, and integrates aesthetically pleasing, informative logging. Let me know if you’d like to adjust any specifics or add more detail!
