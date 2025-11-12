@@ -1,6 +1,7 @@
 # BCEA Classification Pipeline
 
 Fast-track BCEA code prediction for Belizean business registrations using a fine-tuned transformer model. The project mirrors the ISCO pipeline interface so teams can swap between them with minimal changes.
+[Full docs](https://statistical-institute-of-belize.github.io/bcea_pipeline/)
 
 ## Quick Start (CLI)
 - Create an isolated environment and install dependencies:
